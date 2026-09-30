@@ -184,6 +184,14 @@ export const workPlannerApiSlice = baseApi.injectEndpoints({
         return [{ type: "WorkPlan", id }, { type: "WorkPlan", id: "LIST" }, "WorkPlannerStats"];
       },
     }),
+    addWorkPlanAuthorityRemark: builder.mutation<WorkPlanRecord, { planId: string; remark: string }>({
+      query: ({ planId, remark }) => ({
+        url: `${WORK_PLANNER_SERVICE_URL}/api/work-planner/${planId}/authority-remarks`,
+        method: "POST",
+        body: { remark },
+      }),
+      invalidatesTags: (_result, _error, { planId }) => [{ type: "WorkPlan", id: planId }, "WorkPlannerStats"],
+    }),
     getDayEndDraft: builder.query<DayEndDraftResponse, string>({
       query: (id) => `${WORK_PLANNER_SERVICE_URL}/api/work-planner/${id}/day-end-draft`,
       transformResponse: (res: any) => res.data || res,
@@ -221,11 +229,35 @@ export const workPlannerApiSlice = baseApi.injectEndpoints({
       }),
       invalidatesTags: (_result, _error, { planId }) => [{ type: "WorkPlan", id: planId }, "WorkPlannerStats"],
     }),
+    checkInVisit: builder.mutation<WorkPlanRecord, { planId: string; visitId: string; body?: unknown }>({
+      query: ({ planId, visitId, body }) => ({
+        url: `${WORK_PLANNER_SERVICE_URL}/api/work-planner/${planId}/visits/${visitId}/check-in`,
+        method: "POST",
+        body: body || {},
+      }),
+      invalidatesTags: (_result, _error, { planId }) => [{ type: "WorkPlan", id: planId }, "WorkPlannerStats"],
+    }),
+    checkOutVisit: builder.mutation<WorkPlanRecord, { planId: string; visitId: string; body?: unknown }>({
+      query: ({ planId, visitId, body }) => ({
+        url: `${WORK_PLANNER_SERVICE_URL}/api/work-planner/${planId}/visits/${visitId}/check-out`,
+        method: "POST",
+        body: body || {},
+      }),
+      invalidatesTags: (_result, _error, { planId }) => [{ type: "WorkPlan", id: planId }, "WorkPlannerStats"],
+    }),
     completeVisit: builder.mutation<WorkPlanRecord, { planId: string; visitId: string; body: unknown }>({
       query: ({ planId, visitId, body }) => ({
         url: `${WORK_PLANNER_SERVICE_URL}/api/work-planner/${planId}/visits/${visitId}/complete`,
         method: "POST",
         body,
+      }),
+      invalidatesTags: (_result, _error, { planId }) => [{ type: "WorkPlan", id: planId }, "WorkPlannerStats"],
+    }),
+    addVisitAuthorityRemark: builder.mutation<WorkPlanRecord, { planId: string; visitId: string; remark: string }>({
+      query: ({ planId, visitId, remark }) => ({
+        url: `${WORK_PLANNER_SERVICE_URL}/api/work-planner/${planId}/visits/${visitId}/authority-remarks`,
+        method: "POST",
+        body: { remark },
       }),
       invalidatesTags: (_result, _error, { planId }) => [{ type: "WorkPlan", id: planId }, "WorkPlannerStats"],
     }),
@@ -298,6 +330,14 @@ export const workPlannerApiSlice = baseApi.injectEndpoints({
       query: ({ planId, workId }) => ({
         url: `${WORK_PLANNER_SERVICE_URL}/api/work-planner/${planId}/works/${workId}`,
         method: "DELETE",
+      }),
+      invalidatesTags: (_result, _error, { planId }) => [{ type: "WorkPlan", id: planId }, "WorkPlannerStats"],
+    }),
+    addWorkAuthorityRemark: builder.mutation<WorkPlanRecord, { planId: string; workId: string; remark: string }>({
+      query: ({ planId, workId, remark }) => ({
+        url: `${WORK_PLANNER_SERVICE_URL}/api/work-planner/${planId}/works/${workId}/authority-remarks`,
+        method: "POST",
+        body: { remark },
       }),
       invalidatesTags: (_result, _error, { planId }) => [{ type: "WorkPlan", id: planId }, "WorkPlannerStats"],
     }),
@@ -472,16 +512,21 @@ export const {
   useApprovePlanMutation,
   useRejectPlanMutation,
   useCompletePlanMutation,
+  useAddWorkPlanAuthorityRemarkMutation,
   useAddVisitMutation,
   useUpdateVisitMutation,
   useRemoveVisitMutation,
+  useCheckInVisitMutation,
+  useCheckOutVisitMutation,
   useAddStandaloneVisitMutation,
   useUpdateStandaloneVisitMutation,
   useRemoveStandaloneVisitMutation,
   useCompleteVisitMutation,
+  useAddVisitAuthorityRemarkMutation,
   useAddWorkMutation,
   useUpdateWorkMutation,
   useRemoveWorkMutation,
+  useAddWorkAuthorityRemarkMutation,
   useAddStandaloneWorkMutation,
   useUpdateStandaloneWorkMutation,
   useRemoveStandaloneWorkMutation,

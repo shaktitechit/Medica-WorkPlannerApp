@@ -11,6 +11,7 @@ export type WorkPlanVisitStatus =
   | "pending"
   | "in_progress"
   | "checked_in"
+  | "checked_out"
   | "completed"
   | "cancelled"
   | "skipped"
@@ -19,6 +20,8 @@ export type WorkPlanVisitStatus =
 export type WorkPlanVisitPartyType =
   | "existing"
   | "existing_lead"
+  | "facility"
+  | "enquiry"
   | "new_party"
   | "new_lead";
 
@@ -136,8 +139,11 @@ export type WorkPlanExpenseRecord = {
   bill_date?: string;
   description?: string;
   receipt_attachment?: WorkPlanExpenseAttachment | string | null;
+  attachments?: (WorkPlanExpenseAttachment | string)[];
   start_reading?: number;
   closing_reading?: number;
+  total_km?: number;
+  rate_per_km?: number;
   start_reading_image?: WorkPlanExpenseAttachment | string | null;
   end_reading_image?: WorkPlanExpenseAttachment | string | null;
   status: WorkPlanExpenseStatus;
@@ -147,6 +153,15 @@ export type WorkPlanExpenseRecord = {
   created_by?: { _id?: string; name?: string; email?: string } | string;
   createdAt?: string;
   updatedAt?: string;
+};
+
+export type AuthorityRemarkItem = {
+  _id?: string;
+  remark: string;
+  user?: string | { _id: string; name?: string; email?: string; department?: string };
+  user_name?: string;
+  role?: string;
+  created_at?: string;
 };
 
 export type WorkPlanVisitRecord = {
@@ -200,11 +215,22 @@ export type WorkPlanVisitRecord = {
   status: WorkPlanVisitStatus;
   actual_check_in?: string;
   actual_check_out?: string;
+  check_in_selfie_url?: string;
+  check_out_selfie_url?: string;
+  outcome_selfie_url?: string;
+  check_in_lat?: number;
+  check_in_lng?: number;
+  check_in_address?: string;
+  check_out_lat?: number;
+  check_out_lng?: number;
+  check_out_address?: string;
   check_in_time?: string;
   check_out_time?: string;
   outcome?: string;
   pending_remarks?: string;
   in_progress_remarks?: string;
+  manager_remarks?: string;
+  authority_remarks?: AuthorityRemarkItem[];
   meeting_with_doctor?: boolean;
   meeting_with_purchase?: boolean;
   meeting_with_finance?: boolean;
@@ -212,6 +238,7 @@ export type WorkPlanVisitRecord = {
   new_product_introduced?: boolean;
   order_received?: boolean;
   next_followup_date?: string;
+  rescheduled_date?: string;
   created_by?: string | { _id?: string; name?: string; email?: string; role?: string };
   created_by_role?: string;
   updated_by?: string | { _id?: string; name?: string; email?: string; role?: string };
@@ -239,10 +266,13 @@ export type WorkPlanWorkRecord = {
   description?: string;
   planned_start_time?: string;
   planned_end_time?: string;
-  status: "created" | "pending" | "in_progress" | "completed" | "cancelled";
+  status: "created" | "pending" | "in_progress" | "completed" | "cancelled" | "skipped" | "rescheduled";
   completion_remarks?: string;
   pending_remarks?: string;
   in_progress_remarks?: string;
+  manager_remarks?: string;
+  rescheduled_date?: string;
+  authority_remarks?: AuthorityRemarkItem[];
   outcome?: string;
   work_type?: "default" | "optional" | string;
   is_default_task?: boolean;
@@ -274,6 +304,8 @@ export type WorkPlanRecord = {
   status: WorkPlanStatus;
   plan_type?: "Visits" | "Tasks & Visits" | "Leave" | "Work From Home" | "Work From Office";
   remarks?: string;
+  manager_remarks?: string;
+  authority_remarks?: AuthorityRemarkItem[];
   location?: string;
   is_discussed_with_manager?: boolean;
   discussed_manager_id?: string | { _id?: string; name?: string; email?: string };
@@ -382,14 +414,41 @@ export type AuthUser = {
   name: string;
   email: string;
   department: string;
+  parent_department?: string;
+  parentDepartment?: string;
   roles?: string[];
   role_codes?: string[];
   role_names?: string[];
   portals?: UserPortalAccess[];
 };
 
+export function isPowerAuditUser(user: any): boolean {
+  if (!user) return false;
+  const uAny = user as any;
+  const parentDept = String(
+    uAny.parent_department ||
+      uAny.parentDepartment ||
+      (typeof uAny.department === "object"
+        ? uAny.department?.parent_department || uAny.department?.code || uAny.department?.name
+        : "") ||
+      uAny.department ||
+      ""
+  )
+    .toLowerCase()
+    .trim();
+
+  return (
+    parentDept === "power_audit" ||
+    parentDept === "power-audit" ||
+    parentDept === "power audit" ||
+    parentDept.includes("power_audit") ||
+    parentDept.includes("power audit")
+  );
+}
+
 export type UserSession = {
   token: string;
+  refreshToken?: string;
   user: AuthUser;
 };
 

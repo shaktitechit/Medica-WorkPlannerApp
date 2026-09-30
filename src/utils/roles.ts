@@ -52,11 +52,17 @@ export function isWpManager(user: AuthUser | null | undefined): boolean {
   return getWpAccessRoles(user).includes("manager");
 }
 
-export function isWpElevated(user: AuthUser | null | undefined): boolean {
-  return isWpAdmin(user) || isWpManager(user);
+export function isWpCoordinator(user: AuthUser | null | undefined): boolean {
+  if (!user) return false;
+  if (isWpAdmin(user) || isWpManager(user)) return false;
+  return getWpAccessRoles(user).includes("coordinator");
 }
 
-/** Portal executive, including the legacy `sales` role. Admin and manager are excluded. */
+export function isWpElevated(user: AuthUser | null | undefined): boolean {
+  return isWpAdmin(user) || isWpManager(user) || isWpCoordinator(user);
+}
+
+/** Portal executive, including the legacy `sales` role. Admin, manager, and coordinator are excluded. */
 export function isWpExecutive(user: AuthUser | null | undefined): boolean {
   if (!user || isWpElevated(user)) return false;
   const roles = getWpAccessRoles(user);
@@ -71,6 +77,7 @@ export function isWpExecutive(user: AuthUser | null | undefined): boolean {
 export function roleLabel(user: AuthUser | null | undefined): string {
   if (isWpAdmin(user)) return "Admin";
   if (isWpManager(user)) return "Manager";
+  if (isWpCoordinator(user)) return "Coordinator";
   if (isWpExecutive(user)) return "Executive";
   return "User";
 }
@@ -109,7 +116,7 @@ export function canReceiveWorkPlan(
   if (!portal) return false;
   const accessRoles = stringList(portal.access_roles).concat(portal.access_role ? [String(portal.access_role)] : []);
   if (!accessRoles.length) return true;
-  return accessRoles.some((role) => ["executive", "manager", "admin", "sales"].includes(role.toLowerCase().trim()));
+  return accessRoles.some((role) => ["executive", "coordinator", "manager", "admin", "sales"].includes(role.toLowerCase().trim()));
 }
 
 export function isWorkPlannerPortalUser(

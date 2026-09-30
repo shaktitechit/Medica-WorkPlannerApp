@@ -258,6 +258,27 @@ export async function sharePdfReport(options: {
   await shareFile(printed.uri, "application/pdf", "com.adobe.pdf");
 }
 
+function formatSupervisoryRemarks(
+  managerRemarks?: string,
+  authorityRemarks?: Array<{ role?: string; user_name?: string; remark?: string }>
+): string {
+  const parts: string[] = [];
+  if (managerRemarks && managerRemarks.trim()) {
+    parts.push(`Senior: ${stripHtml(managerRemarks.trim())}`);
+  }
+  if (authorityRemarks && authorityRemarks.length > 0) {
+    authorityRemarks.forEach((ar) => {
+      const roleStr = ar.role ? `[${ar.role.toUpperCase()}] ` : "";
+      const userStr = ar.user_name || "Senior";
+      const remText = stripHtml(ar.remark || "").trim();
+      if (remText) {
+        parts.push(`${roleStr}${userStr}: ${remText}`);
+      }
+    });
+  }
+  return parts.join(" | ");
+}
+
 function visitParty(visit: WorkPlanVisitRecord) {
   return visit.party_name || (typeof visit.party === "object" ? visit.party?.party_name : "") || "Field visit";
 }
@@ -284,7 +305,8 @@ export function buildPlanReportRows(plans: WorkPlanRecord[], activity: "all" | "
       ? `Discussed with ${plan.discussed_manager_name || "manager"}`
       : "";
     const remarks = [stripHtml(plan.remarks), discussed].filter(Boolean).join(" | ") || "—";
-    const haystack = `${executive} ${plan.location || ""} ${plan.plan_type || ""} ${remarks} ${visits.map(visitParty).join(" ")} ${tasks.map((work) => work.title).join(" ")}`.toLowerCase();
+    const planSupervisory = formatSupervisoryRemarks(plan.manager_remarks, plan.authority_remarks);
+    const haystack = `${executive} ${plan.location || ""} ${plan.plan_type || ""} ${remarks} ${planSupervisory} ${visits.map(visitParty).join(" ")} ${tasks.map((work) => work.title).join(" ")}`.toLowerCase();
     if (needle && !haystack.includes(needle)) continue;
     planIndex += 1;
     const visitCount = visits.length;
@@ -297,20 +319,34 @@ export function buildPlanReportRows(plans: WorkPlanRecord[], activity: "all" | "
       activity: plan.plan_type === "Visits" ? `Visits plan (${visitCount})` : `${plan.plan_type || "Plan"} (${taskCount} tasks)`,
       details: plan.location || "—",
       plannedTime: "Full day",
+      rescheduledDate: "—",
       status: statusLabel(plan.status),
       remarks,
+      supervisoryRemarks: planSupervisory || "—",
     });
     visits.forEach((visit, index) => {
+      const visitContacts = Array.isArray(visit.contacts) && visit.contacts.length > 0
+        ? visit.contacts
+        : (visit.contact_person || visit.contact_number || visit.phone || visit.contact_email)
+          ? [{ contact_person: visit.contact_person, contact_number: visit.contact_number || visit.phone, contact_email: visit.contact_email }]
+          : [];
+
+      const contactDetails = visitContacts.length > 0
+        ? visitContacts.map((c) => [c.contact_person, c.contact_number].filter(Boolean).join(" · ")).filter(Boolean).join(" | ")
+        : [visit.contact_person, visit.contact_number || visit.phone].filter(Boolean).join(" · ");
+
       rows.push({
         hierarchyId: `${planIndex}.${index + 1}`,
         rowType: "FIELD VISIT",
         date: formatPlanDate(plan.plan_date),
         executive,
         activity: `Field visit: ${visitParty(visit)}`,
-        details: [visit.contact_person, visit.contact_number || visit.phone, visit.address || plan.location].filter(Boolean).join(" | ") || "—",
-        plannedTime: clock(visit.planned_start_time),
+        details: [contactDetails, visit.address || plan.location].filter(Boolean).join(" | ") || "—",
+        plannedTime: visit.rescheduled_date ? `${clock(visit.planned_start_time)} (Resch: ${formatPlanDate(visit.rescheduled_date)})` : clock(visit.planned_start_time),
+        rescheduledDate: visit.rescheduled_date ? formatPlanDate(visit.rescheduled_date) : "—",
         status: statusLabel(visit.status),
         remarks: stripHtml(visit.outcome || visit.notes || visit.purpose) || "—",
+        supervisoryRemarks: formatSupervisoryRemarks(visit.manager_remarks, visit.authority_remarks) || "—",
       });
     });
     tasks.forEach((work, index) => {
@@ -321,9 +357,11 @@ export function buildPlanReportRows(plans: WorkPlanRecord[], activity: "all" | "
         executive,
         activity: `Work task: ${work.title}`,
         details: stripHtml(work.description) || plan.location || "—",
-        plannedTime: clock(work.planned_start_time),
+        plannedTime: work.rescheduled_date ? `${clock(work.planned_start_time)} (Resch: ${formatPlanDate(work.rescheduled_date)})` : clock(work.planned_start_time),
+        rescheduledDate: work.rescheduled_date ? formatPlanDate(work.rescheduled_date) : "—",
         status: statusLabel(work.status),
         remarks: stripHtml(work.completion_remarks || work.outcome) || "—",
+        supervisoryRemarks: formatSupervisoryRemarks(work.manager_remarks, work.authority_remarks) || "—",
       });
     });
   }
@@ -338,8 +376,10 @@ export const PLAN_COLUMNS: ReportColumn[] = [
   { key: "activity", label: "Activity" },
   { key: "details", label: "Contact / address / details" },
   { key: "plannedTime", label: "Schedule" },
+  { key: "rescheduledDate", label: "Rescheduled Date" },
   { key: "status", label: "Status" },
   { key: "remarks", label: "Remarks / outcome" },
+  { key: "supervisoryRemarks", label: "Senior Remarks" },
 ];
 
 export function buildTaskReportRows(plans: WorkPlanRecord[], category: "all" | "visits" | "tasks", status: string, search: string, from: string, to: string) {
@@ -356,7 +396,9 @@ export function buildTaskReportRows(plans: WorkPlanRecord[], category: "all" | "
     locationOrAddress: string;
     descriptionOrNotes: string;
     plannedTime: string;
+    rescheduledDate: string;
     status: string;
+    supervisoryRemarks: string;
   }) => {
     const day = isoDate(item.planDate);
     if (from && day && day < from) return;
@@ -364,7 +406,7 @@ export function buildTaskReportRows(plans: WorkPlanRecord[], category: "all" | "
     if (category === "visits" && item.itemType !== "visit") return;
     if (category === "tasks" && item.itemType !== "task") return;
     if (status !== "all" && item.status !== status) return;
-    const text = `${item.titleOrParty} ${item.executiveName} ${item.contactPerson} ${item.locationOrAddress} ${item.descriptionOrNotes} ${item.status}`.toLowerCase();
+    const text = `${item.titleOrParty} ${item.executiveName} ${item.contactPerson} ${item.locationOrAddress} ${item.descriptionOrNotes} ${item.status} ${item.supervisoryRemarks} ${item.rescheduledDate}`.toLowerCase();
     if (needle && !text.includes(needle)) return;
     rows.push({
       planDate: formatPlanDate(item.planDate),
@@ -377,25 +419,43 @@ export function buildTaskReportRows(plans: WorkPlanRecord[], category: "all" | "
       locationOrAddress: item.locationOrAddress,
       descriptionOrNotes: item.descriptionOrNotes,
       plannedTime: item.plannedTime,
+      rescheduledDate: item.rescheduledDate,
       status: statusLabel(item.status),
+      supervisoryRemarks: item.supervisoryRemarks,
     });
   };
   for (const plan of plans) {
     const executiveName = personName(plan.sales_user) || "—";
     const email = ownerEmail(plan.sales_user);
     for (const visit of plan.visits || []) {
+      const visitContacts = Array.isArray(visit.contacts) && visit.contacts.length > 0
+        ? visit.contacts
+        : (visit.contact_person || visit.contact_number || visit.phone || visit.contact_email)
+          ? [{ contact_person: visit.contact_person, contact_number: visit.contact_number || visit.phone, contact_email: visit.contact_email }]
+          : [];
+
+      const contactPerson = visitContacts.length > 0
+        ? visitContacts.map((c) => c.contact_person).filter(Boolean).join(", ") || "—"
+        : visit.contact_person || "—";
+
+      const contactNumber = visitContacts.length > 0
+        ? visitContacts.map((c) => c.contact_number).filter(Boolean).join(", ") || "—"
+        : visit.contact_number || visit.phone || "—";
+
       push({
         planDate: plan.plan_date,
         itemType: "visit",
         executiveName,
         executiveEmail: email,
         titleOrParty: visitParty(visit),
-        contactPerson: visit.contact_person || "—",
-        contactNumber: visit.contact_number || visit.phone || "—",
+        contactPerson,
+        contactNumber,
         locationOrAddress: visit.address || plan.location || "—",
         descriptionOrNotes: stripHtml(visit.purpose || visit.notes) || "—",
         plannedTime: clock(visit.planned_start_time),
+        rescheduledDate: visit.rescheduled_date ? formatPlanDate(visit.rescheduled_date) : "—",
         status: visit.status || "created",
+        supervisoryRemarks: formatSupervisoryRemarks(visit.manager_remarks, visit.authority_remarks) || "—",
       });
     }
     for (const work of plan.works || []) {
@@ -410,7 +470,9 @@ export function buildTaskReportRows(plans: WorkPlanRecord[], category: "all" | "
         locationOrAddress: plan.location || "Office / remote",
         descriptionOrNotes: stripHtml(work.description) || "—",
         plannedTime: clock(work.planned_start_time),
+        rescheduledDate: work.rescheduled_date ? formatPlanDate(work.rescheduled_date) : "—",
         status: work.status || "created",
+        supervisoryRemarks: formatSupervisoryRemarks(work.manager_remarks, work.authority_remarks) || "—",
       });
     }
   }
@@ -428,7 +490,9 @@ export const TASK_COLUMNS: ReportColumn[] = [
   { key: "locationOrAddress", label: "Location / address" },
   { key: "descriptionOrNotes", label: "Purpose / description" },
   { key: "plannedTime", label: "Planned schedule" },
+  { key: "rescheduledDate", label: "Rescheduled Date" },
   { key: "status", label: "Status" },
+  { key: "supervisoryRemarks", label: "Senior Remarks" },
 ];
 
 function expenseOwner(expense: WorkPlanExpenseRecord) {
@@ -446,10 +510,23 @@ export function buildExpenseReportRows(expenses: WorkPlanExpenseRecord[], paymen
       return !needle || text.includes(needle);
     })
     .map((expense, index) => {
+      const isPrivateBike = expense.category === "Travel" && expense.sub_category === "Private Bike";
+      const totalKm = expense.total_km != null
+        ? expense.total_km
+        : expense.closing_reading != null && expense.start_reading != null
+          ? Math.max(0, expense.closing_reading - expense.start_reading)
+          : null;
       const odometer =
         expense.start_reading != null || expense.closing_reading != null
           ? `${expense.start_reading ?? "—"} -> ${expense.closing_reading ?? "—"}`
           : "—";
+      const distance = totalKm != null ? `${totalKm} KM${isPrivateBike ? " (@ ₹3.5/km)" : ""}` : "—";
+      const attachCount = Array.isArray(expense.attachments) && expense.attachments.length > 0
+        ? `${expense.attachments.length} files`
+        : expense.receipt_attachment
+          ? "1 file"
+          : "0 files";
+
       const visit = expense.work_plan_visit;
       const visitPartyName =
         visit && typeof visit === "object"
@@ -470,6 +547,8 @@ export function buildExpenseReportRows(expenses: WorkPlanExpenseRecord[], paymen
         bill_date: formatPlanDate(expense.bill_date),
         visit_party: visitPartyName,
         odometer,
+        distance,
+        attachments: attachCount,
         status: statusLabel(expense.status),
         description: expense.description || "—",
       } satisfies ReportRow;
@@ -489,6 +568,8 @@ export const EXPENSE_COLUMNS: ReportColumn[] = [
   { key: "bill_date", label: "Bill date" },
   { key: "visit_party", label: "Linked visit" },
   { key: "odometer", label: "Odometer" },
+  { key: "distance", label: "Distance / Rate" },
+  { key: "attachments", label: "Attachments" },
   { key: "status", label: "Status" },
   { key: "description", label: "Description" },
 ];

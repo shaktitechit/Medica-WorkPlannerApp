@@ -2,6 +2,12 @@ export type MailVisit = {
   party_name?: string;
   contact_person?: string;
   contact_number?: string;
+  contact_email?: string;
+  contacts?: Array<{
+    contact_person?: string;
+    contact_number?: string;
+    contact_email?: string;
+  }>;
   address?: string;
   status?: string;
   planned_start_time?: string;
@@ -152,8 +158,17 @@ ${summary.visits
       status === "completed"
         ? `${visit.outcome ? `<div style="color: #15803d; font-weight: 500; margin-bottom: 6px;">${esc(visit.outcome)}</div>` : ""}${checklistHtml(visit)}` || "—"
         : remarkHtml(status, visit.outcome || "", visit.in_progress_remarks || "", visit.pending_remarks || "", visit.outcome || visit.in_progress_remarks || visit.pending_remarks || "");
+    const visitContacts = Array.isArray(visit.contacts) && visit.contacts.length > 0
+      ? visit.contacts
+      : (visit.contact_person || visit.contact_number || visit.contact_email)
+        ? [{ contact_person: visit.contact_person, contact_number: visit.contact_number, contact_email: visit.contact_email }]
+        : [];
+    const contactInfoHtml = visitContacts.length > 0
+      ? visitContacts.map((c) => `<div style="font-size: 11px; color: #64748b;">Contact: ${esc([c.contact_person, c.contact_number].filter(Boolean).join(" · "))}</div>`).join("")
+      : (visit.contact_person ? `<div style="font-size: 11px; color: #64748b;">Contact: ${esc(visit.contact_person)}</div>` : "");
+
     return `<tr style="background-color: ${index % 2 === 0 ? "#ffffff" : "#f8fafc"};">
-<td style="padding: 10px 12px; border: 1px solid #e2e8f0;"><div style="font-weight: 600;">${index + 1}. ${esc(visit.party_name || "N/A")}</div>${visit.contact_person ? `<div style="font-size: 11px; color: #64748b;">Contact: ${esc(visit.contact_person)}</div>` : ""}</td>
+<td style="padding: 10px 12px; border: 1px solid #e2e8f0;"><div style="font-weight: 600;">${index + 1}. ${esc(visit.party_name || "N/A")}</div>${contactInfoHtml}</td>
 <td style="padding: 10px 12px; border: 1px solid #e2e8f0;">${esc(visit.purpose || "General")}</td>
 <td style="padding: 10px 12px; border: 1px solid #e2e8f0;">${esc(time)}</td>
 <td style="padding: 10px 12px; border: 1px solid #e2e8f0; text-align: center;"><span style="display: inline-block; padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; ${dayEndBadgeStyle(status)}">${esc(mailStatusLabel(status))}</span></td>
@@ -225,14 +240,25 @@ export function buildPlanMailHtml(summary: PlanMailSummary) {
 </tr></thead><tbody>
 ${summary.visits
   .map(
-    (visit, index) => `<tr>
+    (visit, index) => {
+      const visitContacts = Array.isArray(visit.contacts) && visit.contacts.length > 0
+        ? visit.contacts
+        : (visit.contact_person || visit.contact_number || visit.contact_email)
+          ? [{ contact_person: visit.contact_person, contact_number: visit.contact_number, contact_email: visit.contact_email }]
+          : [];
+      const contactCellHtml = visitContacts.length > 0
+        ? visitContacts.map((c) => `<div>${esc(c.contact_person || "—")}${c.contact_number ? `<br/><small style="color:#64748b">${esc(c.contact_number)}</small>` : ""}</div>`).join("<div style='height:4px'></div>")
+        : `${esc(visit.contact_person || "—")}<br/><small style="color:#64748b">${esc(visit.contact_number || "")}</small>`;
+
+      return `<tr>
 <td style="padding: 8px; border: 1px solid #cbd5e1; font-weight: bold;">${index + 1}</td>
 <td style="padding: 8px; border: 1px solid #cbd5e1; font-weight: bold; color: #0f172a;">${esc(visit.party_name || "N/A")}</td>
-<td style="padding: 8px; border: 1px solid #cbd5e1;">${esc(visit.contact_person || "—")}<br/><small style="color:#64748b">${esc(visit.contact_number || "")}</small></td>
+<td style="padding: 8px; border: 1px solid #cbd5e1;">${contactCellHtml}</td>
 <td style="padding: 8px; border: 1px solid #cbd5e1;">${esc(visit.address || "—")}</td>
 <td style="padding: 8px; border: 1px solid #cbd5e1;">${badge(visit.status)}</td>
 <td style="padding: 8px; border: 1px solid #cbd5e1;">${esc(visit.planned_start_time || "Full Day")}</td>
-</tr>`,
+</tr>`;
+    },
   )
   .join("")}
 </tbody></table>`

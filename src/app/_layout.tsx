@@ -62,6 +62,7 @@ function ThemedShell() {
           <Stack.Screen name="team" options={{ headerShown: false }} />
           <Stack.Screen name="assigned-teams" options={{ title: "Team hierarchy" }} />
           <Stack.Screen name="team-manager" options={{ title: "Team manager" }} />
+          <Stack.Screen name="project" options={{ headerShown: false }} />
         </Stack>
         </AuthGate>
     </>

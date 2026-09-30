@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { AppHeader } from "@/components/AppHeader";
 import { PersonSelect } from "@/components/PersonSelect";
-import { Button, Card, Chip, Empty, FilterBar, Headline, Loading, Screen } from "@/components/ui";
+import { Button, Card, Chip, Empty, FilterBar, Headline, Loading, Screen, SplitActions } from "@/components/ui";
 import { earliestOpenPlanDate, formatPlanDate, isoDate, monthBounds, personId, personName, stripHtml, todayISO } from "@/lib/dates";
 import { useTeamScope } from "@/lib/teamScope";
 import { useGetPlansQuery } from "@/store/api/workPlannerApiSlice";
@@ -119,10 +119,10 @@ export default function CalendarScreen() {
           ) : null}
         </View>
       ) : null}
-      <View style={{ flexDirection: "row", gap: 8 }}>
+      <SplitActions>
         <Button label="New plan" onPress={openNewPlan} />
-        <Button label="Plans" variant="ghost" onPress={() => router.push("/(tabs)/plans")} />
-      </View>
+        <Button label="All plans" variant="ghost" onPress={() => router.push("/(tabs)/plans")} />
+      </SplitActions>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         {[
           ["Total plans", counts.total],
@@ -130,7 +130,7 @@ export default function CalendarScreen() {
           ["Approved", counts.approved],
           ["Planned / pending", counts.pending],
         ].map(([label, value]) => (
-          <View key={String(label)} style={{ minWidth: "47%", flexGrow: 1, borderWidth: 1, borderColor: colors.border, borderRadius: 12, padding: 10, backgroundColor: colors.card }}>
+          <View key={String(label)} style={{ minWidth: 140, flex: 1, borderWidth: 1, borderColor: colors.border, borderRadius: 12, padding: 10, backgroundColor: colors.card }}>
             <Text style={{ color: colors.muted, fontSize: 12 }}>{label}</Text>
             <Text style={{ color: colors.text, fontSize: 20, fontWeight: "800" }}>{value}</Text>
           </View>

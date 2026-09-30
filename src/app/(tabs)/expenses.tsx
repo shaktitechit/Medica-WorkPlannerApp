@@ -1,6 +1,7 @@
+import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams } from "expo-router";
 import { useEffect, useMemo, useState } from "react";
-import { Alert, Linking, Text, View } from "react-native";
+import { Alert, Linking, Pressable, Text, View } from "react-native";
 import { AppHeader } from "@/components/AppHeader";
 import { ReportSheet } from "@/components/ReportSheet";
 import { DatePickerField } from "@/components/DateRangePicker";
@@ -44,7 +45,9 @@ function money(amount: number) {
 function receiptLink(file: WorkPlanExpenseAttachment | string | null | undefined, token?: string) {
   if (!file) return null;
   if (typeof file === "string") {
-    return file.startsWith("http") ? file : "";
+    if (file.startsWith("http")) return file;
+    const base = `${WORK_PLANNER_SERVICE_URL}/api/work-planner/attachments/${file}/view`;
+    return token ? `${base}?token=${encodeURIComponent(token)}` : base;
   }
   if (file.url) return file.url;
   if (!file._id) return null;
@@ -149,10 +152,20 @@ export default function ExpensesScreen() {
       {rows.map((expense) => {
         const expenseId = String(expense._id || expense.id || "");
         const planId = planIdOf(expense);
-        const receipt = receiptLink(expense.receipt_attachment, session?.token);
-        const receiptName = typeof expense.receipt_attachment === "object"
-          ? expense.receipt_attachment?.original_name || expense.receipt_attachment?.file_name || "Receipt"
-          : "Receipt";
+        const isPrivateBike = expense.category === "Travel" && expense.sub_category === "Private Bike";
+        const totalKm = expense.total_km != null
+          ? expense.total_km
+          : expense.closing_reading != null && expense.start_reading != null
+            ? Math.max(0, expense.closing_reading - expense.start_reading)
+            : null;
+
+        const allAttachments: (any)[] = [];
+        if (expense.attachments && Array.isArray(expense.attachments) && expense.attachments.length > 0) {
+          allAttachments.push(...expense.attachments);
+        } else if (expense.receipt_attachment) {
+          allAttachments.push(expense.receipt_attachment);
+        }
+
         return (
           <Card key={expenseId}>
             <Headline
@@ -164,15 +177,53 @@ export default function ExpensesScreen() {
             />
             <Text style={{ color: colors.text, fontSize: 18, fontWeight: "800" }}>{money(expense.amount)}</Text>
             {expense.description ? <Text style={{ color: colors.muted }}>{expense.description}</Text> : null}
+
+            {isPrivateBike && (expense.start_reading != null || expense.closing_reading != null) ? (
+              <View style={{ backgroundColor: "#0284c715", borderWidth: 1, borderColor: "#38bdf840", borderRadius: 8, padding: 8, gap: 2 }}>
+                <Text style={{ color: "#0284c7", fontSize: 11, fontWeight: "700" }}>🚲 Private Bike Mileage (₹3.50 / KM)</Text>
+                <Text style={{ color: colors.text, fontSize: 12 }}>
+                  {expense.start_reading ?? "—"} KM → {expense.closing_reading ?? "—"} KM
+                  {totalKm != null ? ` (${totalKm} KM = ₹${(totalKm * 3.5).toFixed(2)})` : ""}
+                </Text>
+              </View>
+            ) : null}
+
             {expense.vendor_name || expense.bill_number ? (
               <Text style={{ color: colors.muted, fontSize: 12 }}>
-                {[expense.vendor_name, expense.bill_number].filter(Boolean).join(" · ")}
+                {[expense.vendor_name, expense.bill_number ? `Bill #${expense.bill_number}` : ""].filter(Boolean).join(" · ")}
               </Text>
             ) : null}
-            {expense.rejection_reason ? <Text style={{ color: colors.danger }}>{expense.rejection_reason}</Text> : null}
-            {receipt ? (
-              <Button label={receiptName} variant="ghost" onPress={() => void Linking.openURL(receipt).catch(() => Alert.alert("Receipt", "Could not open this file"))} />
+
+            {allAttachments.length > 0 ? (
+              <View style={{ gap: 4 }}>
+                <Text style={{ color: colors.muted, fontSize: 11, fontWeight: "600" }}>Attachments ({allAttachments.length}):</Text>
+                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+                  {allAttachments.map((att, idx) => {
+                    const url = receiptLink(att, session?.token);
+                    const name = typeof att === "object" ? att.original_name || att.file_name || `Receipt ${idx + 1}` : `Receipt ${idx + 1}`;
+                    return (
+                      <Pressable
+                        key={idx}
+                        onPress={() => {
+                          if (url) {
+                            void Linking.openURL(url).catch(() => Alert.alert("Receipt", "Could not open this document."));
+                          }
+                        }}
+                        style={{ flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: colors.cardAlt, borderWidth: 1, borderColor: colors.border, borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4 }}
+                      >
+                        <Ionicons name="document-attach-outline" size={13} color={colors.primary} />
+                        <Text numberOfLines={1} style={{ fontSize: 11, color: colors.primary, fontWeight: "600", maxWidth: 160 }}>
+                          {name}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
             ) : null}
+
+            {expense.rejection_reason ? <Text style={{ color: colors.danger }}>{expense.rejection_reason}</Text> : null}
+
             {elevated && expense.status === "submitted" && planId ? (
               <SplitActions>
                 <Button

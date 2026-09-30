@@ -9,6 +9,7 @@ import { apiErrorMessage } from "@/lib/apiError";
 import { earliestOpenPlanDate, formatPlanDate, isPlanWindowClosed, personId, stripHtml, todayISO } from "@/lib/dates";
 import { buildPlanMailHtml } from "@/lib/planMail";
 import { useSession } from "@/lib/session";
+import { uploadMobileFile } from "@/lib/mobileUpload";
 import { useGetUsersQuery } from "@/store/api/authApiSlice";
 import {
   useAddVisitMutation,
@@ -82,8 +83,8 @@ type PendingRow = {
   raw: WorkPlanVisitRecord | WorkPlanWorkRecord;
 };
 
-type DraftVisit = WorkPlanVisitRecord & { localId: string };
-type DraftWork = WorkPlanWorkRecord & { localId: string };
+type DraftVisit = WorkPlanVisitRecord & { localId: string; is_from_previous_plan?: boolean; previous_plan_date?: string };
+type DraftWork = WorkPlanWorkRecord & { localId: string; is_from_previous_plan?: boolean; previous_plan_date?: string };
 type ManagerOption = { _id: string; name?: string; email?: string; roleBadge?: string; wp_role?: string };
 
 export default function PlanFormScreen() {
@@ -127,6 +128,8 @@ export default function PlanFormScreen() {
   const copiedWorks = useRef<DraftWork[]>([]);
   const loadedKey = useRef("");
   const templatesSeeded = useRef("");
+  const autoRolloverRanRef = useRef("");
+  const [autoRolloverLoading, setAutoRolloverLoading] = useState(false);
 
   const targetUserId = elevated && salesUserId ? salesUserId : selfId;
   const settings = useGetUserSettingsQuery(targetUserId, { skip: !targetUserId });
@@ -318,7 +321,7 @@ export default function PlanFormScreen() {
         _id: String(manager._id || ""),
         name: manager.name || manager.email || "Manager",
         email: manager.email || "",
-        roleBadge: manager.roleBadge || (String(manager.wp_role || "").toLowerCase() === "admin" ? "Portal Admin" : "Portal Manager"),
+        roleBadge: manager.roleBadge || (String(manager.wp_role || "").toLowerCase() === "admin" ? "Portal Admin" : String(manager.wp_role || "").toLowerCase() === "coordinator" ? "Portal Coordinator" : "Portal Manager"),
       }))
       .filter((manager) => manager._id);
   }, [managers.data]);
@@ -349,6 +352,120 @@ export default function PlanFormScreen() {
     });
     setPlanType((current) => (current === "Visits" ? "Tasks & Visits" : current));
   }, [checkingPlan, updating, params.copy, sourceApplied, settings.data, targetUserId, planDate]);
+
+  const handleAutoRollover = async (isManual = false) => {
+    if (completedLocked || dateLocked || !planDate || !targetUserId) return;
+    try {
+      setAutoRolloverLoading(true);
+      const res = await fetchPlans({
+        sales_user: targetUserId,
+        sales_user_id: targetUserId,
+        limit: 50,
+        include_standalone: false,
+        include_visits: true,
+        include_works: true,
+      }).unwrap();
+
+      const allPlans = (res?.data || []) as WorkPlanRecord[];
+      const currentPlanDateNormalized = planDate.split("T")[0];
+
+      const previousPlans = allPlans
+        .filter((p: WorkPlanRecord) => {
+          if (!p.plan_date) return false;
+          const pDateNormalized = p.plan_date.split("T")[0];
+          if (pDateNormalized >= currentPlanDateNormalized) return false;
+          if (isPlanWindowClosed(p.plan_date)) return false;
+          return true;
+        })
+        .sort((a: WorkPlanRecord, b: WorkPlanRecord) => new Date(b.plan_date).getTime() - new Date(a.plan_date).getTime());
+
+      if (previousPlans.length === 0) {
+        if (isManual) {
+          Alert.alert("Auto Rollover", "No eligible previous plans within the 3-day window found for auto-rollover.");
+        }
+        return;
+      }
+
+      const existingVisitIds = new Set(
+        [...visits.map((v) => recordId(v)), ...(loadedPlan?.visits || []).map((v) => recordId(v))].filter(Boolean)
+      );
+      const existingWorkIds = new Set(
+        [...works.map((w) => recordId(w)), ...(loadedPlan?.works || []).map((w) => recordId(w))].filter(Boolean)
+      );
+
+      const newVisitsToAdd: DraftVisit[] = [];
+      const newWorksToAdd: DraftWork[] = [];
+
+      for (const p of previousPlans) {
+        for (const v of p.visits || []) {
+          const vId = recordId(v);
+          if (vId && existingVisitIds.has(vId)) continue;
+          if (["created", "pending", "in_progress", "checked_in"].includes(v.status)) {
+            if (vId) existingVisitIds.add(vId);
+            newVisitsToAdd.push({
+              ...v,
+              localId: `rollover-${vId || Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+              is_from_previous_plan: true,
+              previous_plan_date: p.plan_date,
+            });
+          }
+        }
+        for (const w of p.works || []) {
+          const wId = recordId(w);
+          if (wId && existingWorkIds.has(wId)) continue;
+          if (["created", "pending", "in_progress"].includes(w.status)) {
+            if (wId) existingWorkIds.add(wId);
+            newWorksToAdd.push({
+              ...w,
+              localId: `rollover-${wId || Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+              is_from_previous_plan: true,
+              previous_plan_date: p.plan_date,
+            });
+          }
+        }
+      }
+
+      const visitsCount = newVisitsToAdd.length;
+      const tasksCount = newWorksToAdd.length;
+
+      if (visitsCount === 0 && tasksCount === 0) {
+        if (isManual) {
+          Alert.alert("Auto Rollover", "No uncompleted visits or tasks found to roll over.");
+        }
+        return;
+      }
+
+      if (visitsCount > 0) {
+        setVisits((prev) => [...prev, ...newVisitsToAdd]);
+      }
+      if (tasksCount > 0) {
+        setWorks((prev) => [...prev, ...newWorksToAdd]);
+      }
+
+      if (tasksCount > 0 && (planType === "Visits" || visits.length > 0 || visitsCount > 0)) {
+        setPlanType("Tasks & Visits");
+      }
+
+      Alert.alert(
+        "Auto Rollover Completed",
+        `🔄 Rolled over ${visitsCount} visit${visitsCount === 1 ? "" : "s"} and ${tasksCount} task${tasksCount === 1 ? "" : "s"} from previous plans.`
+      );
+    } catch (err: any) {
+      if (isManual) {
+        Alert.alert("Auto Rollover Failed", apiErrorMessage(err, "Could not roll over previous items."));
+      }
+    } finally {
+      setAutoRolloverLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (isEdit || params.copy || updating || checkingPlan || !sourceApplied || dateLocked || completedLocked) return;
+    const key = `${targetUserId}_${planDate}`;
+    if (autoRolloverRanRef.current === key) return;
+    autoRolloverRanRef.current = key;
+    void handleAutoRollover(false);
+  }, [isEdit, params.copy, updating, checkingPlan, sourceApplied, dateLocked, completedLocked, targetUserId, planDate]);
 
   const pendingItems = useMemo(() => {
     const plans = (pendingPlans.data?.data || []).filter((plan) => {
@@ -463,6 +580,8 @@ export default function PlanFormScreen() {
         party_name: visit.party_name,
         contact_person: visit.contact_person,
         contact_number: visit.contact_number,
+        contact_email: visit.contact_email,
+        contacts: visit.contacts,
         address: visit.address,
         status: visit.status,
         planned_start_time: visit.planned_start_time,
@@ -525,6 +644,8 @@ export default function PlanFormScreen() {
             party_name: visit.party_name,
             contact_person: visit.contact_person,
             contact_number: visit.contact_number,
+            contact_email: visit.contact_email,
+            contacts: visit.contacts,
             address: visit.address,
             purpose: visit.purpose,
             notes: visit.notes,
@@ -544,11 +665,9 @@ export default function PlanFormScreen() {
       }
       const attachmentIds: string[] = [];
       for (const file of mail.files) {
-        const form = new FormData();
-        form.append("file", toFormFile(file), file.name);
-        form.append("resourceId", targetId);
-        const uploaded = await uploadAttachment(form).unwrap();
-        if (uploaded?._id) attachmentIds.push(uploaded._id);
+        const uploaded = await uploadMobileFile(toFormFile(file), "attachments/upload", { resourceId: targetId });
+        const fid = uploaded?._id || uploaded?.id;
+        if (fid) attachmentIds.push(fid);
       }
       await submitPlan({
         id: targetId,
@@ -580,6 +699,15 @@ export default function PlanFormScreen() {
 
   function VisitCard({ visit, onPress, onRemove }: { visit: WorkPlanVisitRecord; onPress?: () => void; onRemove?: () => void }) {
     const when = clock(visit.planned_start_time);
+    const contacts = Array.isArray(visit.contacts) && visit.contacts.length > 0
+      ? visit.contacts
+      : (visit.contact_person || visit.contact_number || visit.contact_email)
+        ? [{ contact_person: visit.contact_person, contact_number: visit.contact_number, contact_email: visit.contact_email }]
+        : [];
+    const contactSummary = contacts.length > 0
+      ? contacts.map((c) => [c.contact_person, c.contact_number].filter(Boolean).join(" · ")).filter(Boolean).join(" | ")
+      : [visit.contact_person, visit.contact_number].filter(Boolean).join(" · ");
+
     return (
       <Card>
         <Pressable onPress={onPress} disabled={!onPress}>
@@ -588,9 +716,9 @@ export default function PlanFormScreen() {
             <StatusTag status={visit.status} />
           </View>
           {visit.purpose ? <Text style={{ color: colors.muted, fontSize: 12 }}>Purpose: {visit.purpose}</Text> : null}
-          {visit.contact_person || visit.contact_number ? (
+          {contactSummary ? (
             <Text style={{ color: colors.text, fontSize: 12, fontWeight: "600" }}>
-              {[visit.contact_person, visit.contact_number].filter(Boolean).join(" · ")}
+              {contactSummary}
             </Text>
           ) : null}
           {visit.address ? <Text style={{ color: colors.muted, fontSize: 12 }}>{visit.address}</Text> : null}
@@ -669,7 +797,7 @@ export default function PlanFormScreen() {
       <Field label="Location" value={location} onChangeText={setLocation} placeholder="City or area" editable={!readOnly} />
       <Field label="Remarks" value={remarks} onChangeText={setRemarks} multiline editable={!readOnly} />
       <Chip
-        label={discussed ? "Discussed with manager" : "Not discussed with manager"}
+        label={discussed ? "Discussed with manager / coordinator" : "Not discussed with manager / coordinator"}
         active={discussed}
         onPress={readOnly ? undefined : () => {
           setDiscussed((value) => {
@@ -715,10 +843,18 @@ export default function PlanFormScreen() {
             <Text style={{ color: colors.muted, fontSize: 13 }}>Cannot add visits to a completed plan.</Text>
           ) : null}
           {!completedLocked && !readOnly ? (
-            <SplitActions>
-              <Button label="Add visit" onPress={() => { setEditingVisitId(null); setVisitOpen(true); }} />
-              <Button label="Previous visits" variant="ghost" onPress={() => { setPendingQuery(""); setPickedIds([]); setPendingMode("visits"); }} />
-            </SplitActions>
+            <View style={{ gap: 8 }}>
+              <SplitActions>
+                <Button label="Add visit" onPress={() => { setEditingVisitId(null); setVisitOpen(true); }} />
+                <Button label="Previous visits" variant="ghost" onPress={() => { setPendingQuery(""); setPickedIds([]); setPendingMode("visits"); }} />
+              </SplitActions>
+              <Button
+                label={autoRolloverLoading ? "Rolling over…" : "Auto Rollover (3 Days)"}
+                variant="ghost"
+                onPress={() => void handleAutoRollover(true)}
+                disabled={autoRolloverLoading}
+              />
+            </View>
           ) : null}
           {(loadedPlan?.visits || []).length + visits.length === 0 ? (
             <Text style={{ color: colors.muted, fontSize: 13 }}>No visits added yet.</Text>
@@ -761,10 +897,18 @@ export default function PlanFormScreen() {
             </FilterBar>
           ) : null}
           {!completedLocked && !readOnly ? (
-            <SplitActions>
-              <Button label="Add task" onPress={() => { setEditingWorkId(null); setWorkOpen(true); }} />
-              <Button label="Previous tasks" variant="ghost" onPress={() => { setPendingQuery(""); setPickedIds([]); setPendingMode("tasks"); }} />
-            </SplitActions>
+            <View style={{ gap: 8 }}>
+              <SplitActions>
+                <Button label="Add task" onPress={() => { setEditingWorkId(null); setWorkOpen(true); }} />
+                <Button label="Previous tasks" variant="ghost" onPress={() => { setPendingQuery(""); setPickedIds([]); setPendingMode("tasks"); }} />
+              </SplitActions>
+              <Button
+                label={autoRolloverLoading ? "Rolling over…" : "Auto Rollover (3 Days)"}
+                variant="ghost"
+                onPress={() => void handleAutoRollover(true)}
+                disabled={autoRolloverLoading}
+              />
+            </View>
           ) : null}
           {(loadedPlan?.works || []).length + works.length === 0 ? (
             <Text style={{ color: colors.muted, fontSize: 13 }}>No tasks added yet.</Text>
@@ -858,6 +1002,7 @@ export default function PlanFormScreen() {
           contact_person: editingVisit.contact_person,
           contact_number: editingVisit.contact_number,
           contact_email: editingVisit.contact_email,
+          contacts: editingVisit.contacts,
           address: editingVisit.address,
           purpose: editingVisit.purpose,
           notes: editingVisit.notes,
@@ -877,6 +1022,7 @@ export default function PlanFormScreen() {
             contact_person: String(body.contact_person || ""),
             contact_number: String(body.contact_number || ""),
             contact_email: body.contact_email as string | undefined,
+            contacts: body.contacts as WorkPlanVisitRecord["contacts"],
             address: body.address as string | undefined,
             purpose: body.purpose as string | undefined,
             notes: body.notes as string | undefined,

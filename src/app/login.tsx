@@ -48,7 +48,7 @@ export default function LoginScreen() {
         setError("Access denied: you do not have Work Planner portal access.");
         return;
       }
-      await signIn({ token: res.token, user: res.user });
+      await signIn({ token: res.token, refreshToken: res.refreshToken, user: res.user });
       router.replace("/(tabs)");
     } catch (err) {
       setError(apiErrorMessage(err, "Login failed"));

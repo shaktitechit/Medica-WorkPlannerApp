@@ -17,10 +17,14 @@ import { canReceiveWorkPlan, isWpAdmin, isWpElevated, isWpManager } from "@/util
 import { mailStatusLabel, type DayEndMailSummary, type PlanMailSummary } from "@/lib/planMail";
 import { useGetLeadsQuery } from "@/store/api/leadsApiSlice";
 import { useGetPartiesQuery } from "@/store/api/partyApiSlice";
+import { useGetPowerFacilitiesQuery, useGetPowerEnquiriesQuery } from "@/store/api/powerAppApiSlice";
+import type { PowerFacility, PowerEnquiry } from "@/types/powerApp";
 import {
   WORK_PLAN_EXPENSE_CATEGORIES,
   WORK_PLAN_EXPENSE_PAYMENT_MODES,
   WORK_PLAN_TRAVEL_SUB_CATEGORIES,
+  isPowerAuditUser,
+  type WorkPlanExpenseAttachment,
   type WorkPlanExpenseCategory,
   type WorkPlanExpensePaymentMode,
   type WorkPlanVisitPartyType,
@@ -47,16 +51,28 @@ export async function pickImageFile(): Promise<LocalFile | null> {
   return { uri: asset.uri, name, type: asset.mimeType || "image/jpeg" };
 }
 
-export function toFormFile(file: LocalFile): Blob {
-  const source = new File(file.uri);
-  if (file.type && !source.type) {
-    try {
-      Object.defineProperty(source, "type", { value: file.type, enumerable: true });
-    } catch {
-      // The native file already exposes a content type.
-    }
-  }
-  return source;
+export async function pickMultipleImageFiles(): Promise<LocalFile[]> {
+  const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+  if (!permission.granted) return [];
+  const result = await ImagePicker.launchImageLibraryAsync({
+    mediaTypes: ["images"],
+    quality: 0.7,
+    allowsMultipleSelection: true,
+  });
+  if (result.canceled || !result.assets || result.assets.length === 0) return [];
+  return result.assets.map((asset, idx) => ({
+    uri: asset.uri,
+    name: asset.fileName || `receipt-${Date.now()}-${idx + 1}.jpg`,
+    type: asset.mimeType || "image/jpeg",
+  }));
+}
+
+export function toFormFile(file: LocalFile): any {
+  return {
+    uri: String(file.uri || ""),
+    name: String(file.name || ""),
+    type: String(file.type || "image/jpeg"),
+  };
 }
 
 export function Sheet({
@@ -93,6 +109,15 @@ export function Sheet({
 }
 
 const PARTY_TYPES: Array<{ id: WorkPlanVisitPartyType; label: string }> = [
+  { id: "existing", label: "Existing Party" },
+  { id: "existing_lead", label: "Existing Leads" },
+  { id: "new_party", label: "New Party" },
+  { id: "new_lead", label: "New Leads" },
+];
+
+const POWER_PARTY_TYPES: Array<{ id: WorkPlanVisitPartyType; label: string }> = [
+  { id: "facility", label: "Audit Facility" },
+  { id: "enquiry", label: "Audit Enquiry" },
   { id: "existing", label: "Existing Party" },
   { id: "existing_lead", label: "Existing Leads" },
   { id: "new_party", label: "New Party" },
@@ -146,13 +171,29 @@ function useAssignablePeople(open: boolean) {
   const users = useGetUsersQuery(undefined, { skip: !open || !admin });
   const team = useGetMyTeamQuery(undefined, { skip: !open || !elevated || admin });
   const people = useMemo(() => {
-    type Person = { _id: string; name?: string; email?: string };
-    const self: Person | null = selfId ? { _id: selfId, name: session?.user?.name || "Me", email: session?.user?.email } : null;
-    const toPeople = (rows: Array<{ _id?: string; id?: string; name?: string; email?: string }>) => {
+    type Person = { _id: string; name?: string; email?: string; department?: string; parent_department?: string; parentDepartment?: string };
+    const self: Person | null = selfId
+      ? {
+          _id: selfId,
+          name: session?.user?.name || "Me",
+          email: session?.user?.email,
+          department: session?.user?.department,
+          parent_department: session?.user?.parent_department || (session?.user as any)?.parentDepartment,
+        }
+      : null;
+    const toPeople = (rows: Array<{ _id?: string; id?: string; name?: string; email?: string; department?: any; parent_department?: any; parentDepartment?: any }>) => {
       const list: Person[] = [];
       for (const user of rows) {
         const id = String(user._id || user.id || "");
-        if (id) list.push({ _id: id, name: user.name, email: user.email });
+        if (id) {
+          list.push({
+            _id: id,
+            name: user.name,
+            email: user.email,
+            department: typeof user.department === "string" ? user.department : user.department?.name || user.department?.code,
+            parent_department: user.parent_department || user.parentDepartment || (typeof user.department === "object" ? user.department?.parent_department : undefined),
+          });
+        }
       }
       return list;
     };
@@ -162,7 +203,7 @@ function useAssignablePeople(open: boolean) {
     };
     if (!elevated) return self ? [self] : [];
     if (admin) return withSelf(toPeople((users.data || []).filter((user) => canReceiveWorkPlan(user, selfId))));
-    return withSelf(toPeople((team.data?.members || []) as Array<{ _id?: string; id?: string; name?: string; email?: string }>));
+    return withSelf(toPeople((team.data?.members || []) as Array<{ _id?: string; id?: string; name?: string; email?: string; department?: any; parent_department?: any }>));
   }, [admin, elevated, users.data, team.data, selfId, session?.user]);
   return { people, selfId, admin, manager, elevated, name: session?.user?.name || "Self" };
 }
@@ -240,6 +281,12 @@ export function VisitFormSheet({
     contact_person?: string;
     contact_number?: string;
     contact_email?: string;
+    contacts?: Array<{
+      contact_person?: string;
+      contact_number?: string;
+      contact_email?: string;
+      designation?: string;
+    }>;
     address?: string;
     purpose?: string;
     notes?: string;
@@ -251,6 +298,7 @@ export function VisitFormSheet({
 }) {
   const styles = useSheetStyles();
   const colors = useThemeColors();
+  const { session } = useSession();
   const roster = useAssignablePeople(visible);
   const [date, setDate] = useState(planDate);
   const [userId, setUserId] = useState(salesUserId || "");
@@ -260,9 +308,9 @@ export function VisitFormSheet({
   const [partyName, setPartyName] = useState("");
   const [partyId, setPartyId] = useState("");
   const [leadId, setLeadId] = useState("");
-  const [contactPerson, setContactPerson] = useState("");
-  const [contactNumber, setContactNumber] = useState("");
-  const [contactEmail, setContactEmail] = useState("");
+  const [contacts, setContacts] = useState<
+    Array<{ id: string; contact_person: string; contact_number: string; contact_email: string; designation?: string }>
+  >([{ id: "c-1", contact_person: "", contact_number: "", contact_email: "" }]);
   const [address, setAddress] = useState("");
   const [purpose, setPurpose] = useState("");
   const [notes, setNotes] = useState("");
@@ -270,10 +318,19 @@ export function VisitFormSheet({
   const [end, setEnd] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const datePlan = useDatePlan(visible, date, userId || roster.selfId);
+
+  const assignedUser = roster.people.find((p: any) => p._id === (userId || roster.selfId));
+  const isPowerAudit = isPowerAuditUser(assignedUser) || isPowerAuditUser(session?.user);
+  const partyTypeChoices = isPowerAudit ? POWER_PARTY_TYPES : PARTY_TYPES;
+
+  const isFacility = partyType === "facility";
+  const isEnquiry = partyType === "enquiry";
+  const isPowerType = isFacility || isEnquiry;
   const existingParty = partyType === "existing";
   const existingLead = partyType === "existing_lead";
-  const existingType = existingParty || existingLead;
+  const existingType = existingParty || existingLead || isPowerType;
   const searchReady = listOpen && search.trim().length >= 2;
+
   const parties = useGetPartiesQuery(
     { search: search.trim(), limit: 8 },
     { skip: !visible || !existingParty || !searchReady },
@@ -282,18 +339,53 @@ export function VisitFormSheet({
     { search: search.trim(), assigned_to: userId || undefined, limit: 8, paginate: "true" },
     { skip: !visible || !existingLead || !searchReady },
   );
+  const facilities = useGetPowerFacilitiesQuery(
+    { search: search.trim(), limit: 10 },
+    { skip: !visible || !isFacility || !searchReady },
+  );
+  const enquiries = useGetPowerEnquiriesQuery(
+    { search: search.trim(), limit: 10 },
+    { skip: !visible || !isEnquiry || !searchReady },
+  );
 
   useEffect(() => {
     if (!visible) return;
     setDate(planDate.slice(0, 10) || planDate);
-    setUserId(salesUserId || roster.selfId);
-    setPartyType(initial?.party_type || "existing");
+    const initialUserId = salesUserId || roster.selfId;
+    setUserId(initialUserId);
+    const effectiveAssigned = roster.people.find((p: any) => p._id === initialUserId);
+    const effectiveIsPower = isPowerAuditUser(effectiveAssigned) || isPowerAuditUser(session?.user);
+    setPartyType(initial?.party_type || (effectiveIsPower ? "facility" : "existing"));
     setPartyId(initial?.party || "");
     setLeadId("");
     setPartyName(initial?.party_name || "");
-    setContactPerson(initial?.contact_person || "");
-    setContactNumber(initial?.contact_number || "");
-    setContactEmail(initial?.contact_email || "");
+
+    const rawContacts = Array.isArray(initial?.contacts) && initial.contacts.length > 0
+      ? initial.contacts
+      : (initial?.contact_person || initial?.contact_number || initial?.contact_email)
+        ? [
+            {
+              contact_person: initial.contact_person || "",
+              contact_number: initial.contact_number || "",
+              contact_email: initial.contact_email || "",
+            },
+          ]
+        : [];
+
+    if (rawContacts.length > 0) {
+      setContacts(
+        rawContacts.map((c, i) => ({
+          id: `c-init-${i}-${Date.now()}`,
+          contact_person: c.contact_person || "",
+          contact_number: c.contact_number || "",
+          contact_email: c.contact_email || "",
+          designation: (c as any).designation || "",
+        }))
+      );
+    } else {
+      setContacts([{ id: "c-1", contact_person: "", contact_number: "", contact_email: "" }]);
+    }
+
     setAddress(initial?.address || "");
     setPurpose(initial?.purpose || "");
     setNotes(initial?.notes || "");
@@ -312,33 +404,206 @@ export function VisitFormSheet({
       ? "Portal Manager — assign and schedule a visit for yourself or your team"
       : "Schedule your field visit details";
 
+  function chooseFacility(fac: PowerFacility) {
+    setPartyId(fac._id || fac.id || "");
+    setLeadId("");
+    const name = fac.name || fac.audit_number || "Facility";
+    setPartyName(name);
+    const facAddr = [fac.address, fac.city].filter(Boolean).join(", ");
+    if (facAddr) setAddress(facAddr);
+    if (fac.audit_type) setPurpose(`Audit: ${fac.audit_type}`);
+    if (fac.audit_number) setNotes(`Audit No: ${fac.audit_number}`);
+
+    const list: Array<{ id: string; contact_person: string; contact_number: string; contact_email: string; designation?: string }> = [];
+    if (Array.isArray(fac.client_representatives) && fac.client_representatives.length > 0) {
+      fac.client_representatives.forEach((c: any, idx: number) => {
+        if (c.name || c.contact_number || c.email) {
+          list.push({
+            id: `fac-c-${idx}-${Date.now()}`,
+            contact_person: c.name || "",
+            contact_number: c.contact_number || "",
+            contact_email: c.email || "",
+            designation: c.designation || "",
+          });
+        }
+      });
+    }
+    if (list.length === 0 && (fac.client_representative || fac.client_contact_number || fac.client_email)) {
+      list.push({
+        id: `fac-root-${Date.now()}`,
+        contact_person: fac.client_representative || "",
+        contact_number: fac.client_contact_number || "",
+        contact_email: fac.client_email || "",
+      });
+    }
+    if (list.length === 0) {
+      list.push({ id: "c-1", contact_person: "", contact_number: "", contact_email: "" });
+    }
+    setContacts(list);
+    setSearch("");
+    setListOpen(false);
+    setErrors({});
+  }
+
+  function chooseEnquiry(enq: PowerEnquiry) {
+    setPartyId(enq._id || enq.id || "");
+    setLeadId("");
+    const name = enq.name || enq.enquiry_number || "Enquiry";
+    setPartyName(name);
+    const enqAddr = [enq.address, enq.city].filter(Boolean).join(", ");
+    if (enqAddr) setAddress(enqAddr);
+    const auditTypes = enq.requested_audit_types?.join(", ") || "";
+    if (auditTypes) setPurpose(`Enquiry Audit: ${auditTypes}`);
+    if (enq.enquiry_number) setNotes(`Enquiry No: ${enq.enquiry_number}${enq.source ? ` | Source: ${enq.source}` : ""}`);
+
+    const list: Array<{ id: string; contact_person: string; contact_number: string; contact_email: string; designation?: string }> = [];
+    if (Array.isArray(enq.client_representatives) && enq.client_representatives.length > 0) {
+      enq.client_representatives.forEach((c: any, idx: number) => {
+        if (c.name || c.contact_number || c.email) {
+          list.push({
+            id: `enq-c-${idx}-${Date.now()}`,
+            contact_person: c.name || "",
+            contact_number: c.contact_number || "",
+            contact_email: c.email || "",
+            designation: c.designation || "",
+          });
+        }
+      });
+    }
+    if (list.length === 0 && (enq.client_representative || enq.client_contact_number || enq.client_email)) {
+      list.push({
+        id: `enq-root-${Date.now()}`,
+        contact_person: enq.client_representative || "",
+        contact_number: enq.client_contact_number || "",
+        contact_email: enq.client_email || "",
+      });
+    }
+    if (list.length === 0) {
+      list.push({ id: "c-1", contact_person: "", contact_number: "", contact_email: "" });
+    }
+    setContacts(list);
+    setSearch("");
+    setListOpen(false);
+    setErrors({});
+  }
+
   function chooseParty(party: PartyRecord) {
-    const contact = partyContact(party);
     setPartyId(party._id || party.id || "");
     setLeadId("");
     setPartyName(party.party_name || "");
-    setContactPerson(contact.name);
-    setContactNumber(contact.phone);
-    setContactEmail(contact.email);
     setAddress(formatPartyAddress(party));
+
+    const list: Array<{ id: string; contact_person: string; contact_number: string; contact_email: string; designation?: string }> = [];
+    if (Array.isArray(party.contacts) && party.contacts.length > 0) {
+      party.contacts.forEach((c, idx) => {
+        if (c.contact_person || c.contact_number || c.contact_email) {
+          list.push({
+            id: `party-c-${idx}-${Date.now()}`,
+            contact_person: c.contact_person || "",
+            contact_number: c.contact_number || "",
+            contact_email: c.contact_email || "",
+            designation: c.designation || "",
+          });
+        }
+      });
+    }
+    if (list.length === 0 && (party.contact_person || party.mobile || party.email)) {
+      list.push({
+        id: `party-root-${Date.now()}`,
+        contact_person: party.contact_person || "",
+        contact_number: party.mobile || "",
+        contact_email: party.email || "",
+      });
+    }
+    if (list.length === 0) {
+      list.push({ id: "c-1", contact_person: "", contact_number: "", contact_email: "" });
+    }
+    setContacts(list);
     setSearch("");
     setListOpen(false);
-    setErrors((prev) => ({ ...prev, partyName: "", contactPerson: "", contactNumber: "" }));
+    setErrors({});
   }
 
   function chooseLead(lead: LeadRecord) {
-    const contacts = lead.contacts || [];
-    const primary = contacts.find((contact) => contact.is_primary) || contacts[0];
     setLeadId(lead._id || lead.id || "");
     setPartyId("");
     setPartyName(lead.company_name?.trim() || lead.name?.trim() || lead.lead_no || "Lead");
-    setContactPerson(primary?.name || lead.name || "");
-    setContactNumber(primary?.phone || lead.phone || lead.alternate_phone || "");
-    setContactEmail(primary?.email || lead.email || "");
     setAddress(formatLeadAddress(lead));
+
+    const list: Array<{ id: string; contact_person: string; contact_number: string; contact_email: string; designation?: string }> = [];
+    if (Array.isArray(lead.contacts) && lead.contacts.length > 0) {
+      lead.contacts.forEach((c, idx) => {
+        if (c.name || c.phone || c.alternate_phone || c.email) {
+          list.push({
+            id: `lead-c-${idx}-${Date.now()}`,
+            contact_person: c.name || "",
+            contact_number: c.phone || c.alternate_phone || "",
+            contact_email: c.email || "",
+            designation: c.designation || c.department || "",
+          });
+        }
+      });
+    }
+    if (list.length === 0 && (lead.name || lead.phone || lead.alternate_phone || lead.email)) {
+      list.push({
+        id: `lead-root-${Date.now()}`,
+        contact_person: lead.name || "",
+        contact_number: lead.phone || lead.alternate_phone || "",
+        contact_email: lead.email || "",
+      });
+    }
+    if (list.length === 0) {
+      list.push({ id: "c-1", contact_person: "", contact_number: "", contact_email: "" });
+    }
+    setContacts(list);
     setSearch("");
     setListOpen(false);
-    setErrors((prev) => ({ ...prev, partyName: "", contactPerson: "", contactNumber: "" }));
+    setErrors({});
+  }
+
+  function addContact() {
+    setContacts((prev) => [
+      ...prev,
+      {
+        id: `c-new-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        contact_person: "",
+        contact_number: "",
+        contact_email: "",
+      },
+    ]);
+  }
+
+  function removeContact(index: number) {
+    if (contacts.length <= 1) return;
+    setContacts((prev) => prev.filter((_, i) => i !== index));
+    setErrors((prev) => {
+      const next = { ...prev };
+      delete next[`contactPerson_${index}`];
+      delete next[`contactNumber_${index}`];
+      delete next[`contactEmail_${index}`];
+      return next;
+    });
+  }
+
+  function updateContact(index: number, field: "contact_person" | "contact_number" | "contact_email", value: string) {
+    setContacts((prev) => {
+      const next = [...prev];
+      next[index] = { ...next[index], [field]: value };
+      return next;
+    });
+    const errKey =
+      field === "contact_person"
+        ? `contactPerson_${index}`
+        : field === "contact_number"
+        ? `contactNumber_${index}`
+        : `contactEmail_${index}`;
+    if (errors[errKey]) {
+      setErrors((prev) => {
+        const next = { ...prev };
+        delete next[errKey];
+        return next;
+      });
+    }
   }
 
   function save() {
@@ -348,25 +613,62 @@ export function VisitFormSheet({
     }
     const next: Record<string, string> = {};
     if (!date) next.planDate = "Plan date is required";
-    if (!partyName.trim()) next.partyName = existingLead ? "Lead / company name is required" : "Party / company name is required";
+    if (!partyName.trim()) {
+      next.partyName = isFacility
+        ? "Facility name is required"
+        : isEnquiry
+        ? "Enquiry name is required"
+        : existingLead
+        ? "Lead / company name is required"
+        : "Party / company name is required";
+    }
     if (existingParty && !partyId) next.partyName = "Select an existing party from the list";
-    if (!contactPerson.trim()) next.contactPerson = "Contact person name is required";
-    if (!contactNumber.trim()) next.contactNumber = "Contact number is required";
-    if (contactEmail.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contactEmail.trim())) next.contactEmail = "Enter a valid email address";
+    if (isFacility && !partyId) next.partyName = "Select a facility from the list";
+    if (isEnquiry && !partyId) next.partyName = "Select an enquiry from the list";
+    
+    if (contacts.length === 0) {
+      next.contacts = "At least one contact person is required";
+    }
+
+    contacts.forEach((c, idx) => {
+      if (!c.contact_person.trim()) next[`contactPerson_${idx}`] = "Contact person name is required";
+      if (!c.contact_number.trim()) next[`contactNumber_${idx}`] = "Contact phone / mobile is required";
+      if (c.contact_email?.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(c.contact_email.trim())) {
+        next[`contactEmail_${idx}`] = "Enter a valid email address";
+      }
+    });
+
     if (Object.keys(next).length) {
       setErrors(next);
       return;
     }
-    const fallback = `${(contactPerson.trim().toLowerCase().replace(/[^a-z0-9]/g, "") || "contact")}@client.com`;
+
+    const primary = contacts[0] || { contact_person: "", contact_number: "", contact_email: "" };
+    const primarySanitizedEmail =
+      primary.contact_email?.trim() && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(primary.contact_email.trim())
+        ? primary.contact_email.trim()
+        : `${(primary.contact_person.trim().toLowerCase().replace(/[^a-z0-9]/g, "") || "contact")}@client.com`;
+
+    const cleanContacts = contacts.map((c) => ({
+      contact_person: c.contact_person.trim(),
+      contact_number: c.contact_number.trim(),
+      contact_email:
+        c.contact_email?.trim() && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(c.contact_email.trim())
+          ? c.contact_email.trim()
+          : undefined,
+      ...(c.designation?.trim() ? { designation: c.designation.trim() } : {}),
+    }));
+
     onSubmit({
       planDate: date,
       salesUserId: userId || roster.selfId,
       party_type: partyType,
-      ...(existingParty && partyId ? { party: partyId } : {}),
+      ...((existingParty || isFacility || isEnquiry) && partyId ? { party: partyId } : {}),
       party_name: partyName.trim(),
-      contact_person: contactPerson.trim(),
-      contact_number: contactNumber.trim(),
-      contact_email: contactEmail.trim() || fallback,
+      contact_person: primary.contact_person.trim(),
+      contact_number: primary.contact_number.trim(),
+      contact_email: primarySanitizedEmail,
+      contacts: cleanContacts,
       address: address.trim() || undefined,
       purpose: purpose.trim() || undefined,
       notes: notes.trim() || undefined,
@@ -390,8 +692,8 @@ export function VisitFormSheet({
         )}
       </View>
       <PlanMatchBanner visible={visible} date={date} userId={userId || roster.selfId} noun="visit" />
-      <View style={styles.row}>
-        {PARTY_TYPES.map((item) => {
+      <View style={[styles.row, { flexWrap: "wrap" }]}>
+        {partyTypeChoices.map((item) => {
           const selected = partyType === item.id;
           return (
             <Pressable
@@ -399,7 +701,7 @@ export function VisitFormSheet({
               style={[styles.choice, selected && styles.choiceOn, { flexDirection: "row", alignItems: "center", gap: 6 }]}
               onPress={() => {
                 setPartyType(item.id);
-                if (item.id !== "existing") setPartyId("");
+                if (item.id !== "existing" && item.id !== "facility" && item.id !== "enquiry") setPartyId("");
                 if (item.id !== "existing_lead") setLeadId("");
                 setListOpen(false);
               }}
@@ -415,10 +717,26 @@ export function VisitFormSheet({
           {listOpen ? (
             <View style={{ gap: 8 }}>
               <Field
-                label={existingLead ? "Search existing lead" : "Search existing party"}
+                label={
+                  isFacility
+                    ? "Search audit facility"
+                    : isEnquiry
+                    ? "Search audit enquiry"
+                    : existingLead
+                    ? "Search existing lead"
+                    : "Search existing party"
+                }
                 value={search}
                 autoFocus
-                placeholder={existingLead ? "Company, contact, phone, lead no" : "Party name, mobile, email"}
+                placeholder={
+                  isFacility
+                    ? "Facility name, audit no, city..."
+                    : isEnquiry
+                    ? "Enquiry name, enquiry no, city..."
+                    : existingLead
+                    ? "Company, contact, phone, lead no"
+                    : "Party name, mobile, email"
+                }
                 onChangeText={setSearch}
               />
               <Button label="Close search" variant="ghost" onPress={() => { setListOpen(false); setSearch(""); }} />
@@ -426,7 +744,13 @@ export function VisitFormSheet({
           ) : (
             <View style={{ gap: 6 }}>
               <Text style={{ color: colors.muted, fontSize: 12, fontWeight: "600" }}>
-                {existingLead ? "Existing lead" : "Existing party"}
+                {isFacility
+                  ? "Audit facility"
+                  : isEnquiry
+                  ? "Audit enquiry"
+                  : existingLead
+                  ? "Existing lead"
+                  : "Existing party"}
               </Text>
               <Pressable
                 onPress={() => {
@@ -437,7 +761,15 @@ export function VisitFormSheet({
               >
                 <Ionicons name="search-outline" size={18} color={colors.muted} />
                 <Text style={{ color: partyName ? colors.text : colors.muted, flex: 1, fontWeight: partyName ? "700" : "400" }} numberOfLines={1}>
-                  {partyName || (existingLead ? "Tap to search a lead" : "Tap to search a party")}
+                  {partyName || (
+                    isFacility
+                      ? "Tap to search a facility"
+                      : isEnquiry
+                      ? "Tap to search an enquiry"
+                      : existingLead
+                      ? "Tap to search a lead"
+                      : "Tap to search a party"
+                  )}
                 </Text>
               </Pressable>
             </View>
@@ -450,6 +782,40 @@ export function VisitFormSheet({
             <View style={{ borderWidth: 1, borderColor: colors.border, borderRadius: 12, overflow: "hidden" }}>
               {!searchReady ? (
                 <Text style={{ color: colors.muted, padding: 12, fontSize: 12 }}>Type at least 2 letters to search.</Text>
+              ) : isFacility ? (
+                facilities.isFetching ? (
+                  <Text style={{ color: colors.muted, padding: 12, fontSize: 12 }}>Searching facilities…</Text>
+                ) : (facilities.data || []).length === 0 ? (
+                  <Text style={{ color: colors.muted, padding: 12, fontSize: 12 }}>No facilities found.</Text>
+                ) : (
+                  (facilities.data || []).slice(0, 8).map((fac) => {
+                    const id = fac._id || fac.id || "";
+                    const subInfo = [fac.audit_number, fac.city, fac.audit_type, fac.client_representative].filter(Boolean).join(" · ");
+                    return (
+                      <Pressable key={id} style={styles.option} onPress={() => chooseFacility(fac)}>
+                        <Text style={{ color: colors.text, fontWeight: "700" }}>{fac.name}</Text>
+                        {subInfo ? <Text style={{ color: colors.muted, fontSize: 12 }}>{subInfo}</Text> : null}
+                      </Pressable>
+                    );
+                  })
+                )
+              ) : isEnquiry ? (
+                enquiries.isFetching ? (
+                  <Text style={{ color: colors.muted, padding: 12, fontSize: 12 }}>Searching enquiries…</Text>
+                ) : (enquiries.data || []).length === 0 ? (
+                  <Text style={{ color: colors.muted, padding: 12, fontSize: 12 }}>No enquiries found.</Text>
+                ) : (
+                  (enquiries.data || []).slice(0, 8).map((enq) => {
+                    const id = enq._id || enq.id || "";
+                    const subInfo = [enq.enquiry_number, enq.city, enq.enquiry_status, enq.client_representative].filter(Boolean).join(" · ");
+                    return (
+                      <Pressable key={id} style={styles.option} onPress={() => chooseEnquiry(enq)}>
+                        <Text style={{ color: colors.text, fontWeight: "700" }}>{enq.name}</Text>
+                        {subInfo ? <Text style={{ color: colors.muted, fontSize: 12 }}>{subInfo}</Text> : null}
+                      </Pressable>
+                    );
+                  })
+                )
               ) : existingLead ? (
                 leads.isFetching ? (
                   <Text style={{ color: colors.muted, padding: 12, fontSize: 12 }}>Searching…</Text>
@@ -501,12 +867,115 @@ export function VisitFormSheet({
           {errors.partyName ? <Text style={{ color: colors.danger, fontSize: 12 }}>{errors.partyName}</Text> : null}
         </View>
       )}
-      <Field label="Contact person name" value={contactPerson} onChangeText={setContactPerson} placeholder="Dr. Rajesh Gupta / Mr. Sharma" />
-      {errors.contactPerson ? <Text style={{ color: colors.danger, fontSize: 12 }}>{errors.contactPerson}</Text> : null}
-      <Field label="Contact phone / mobile" value={contactNumber} onChangeText={setContactNumber} keyboardType="phone-pad" placeholder="9876543210" />
-      {errors.contactNumber ? <Text style={{ color: colors.danger, fontSize: 12 }}>{errors.contactNumber}</Text> : null}
-      <Field label="Contact email (optional)" value={contactEmail} onChangeText={setContactEmail} keyboardType="email-address" autoCapitalize="none" placeholder="contact@client.com" />
-      {errors.contactEmail ? <Text style={{ color: colors.danger, fontSize: 12 }}>{errors.contactEmail}</Text> : null}
+      {/* Contacts Section */}
+      <View style={{ borderWidth: 1, borderColor: colors.border, borderRadius: 12, padding: 12, gap: 10, backgroundColor: colors.cardAlt }}>
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+            <Ionicons name="people-outline" size={16} color={colors.primary} />
+            <Text style={{ color: colors.text, fontSize: 13, fontWeight: "700" }}>
+              Contacts ({contacts.length})
+            </Text>
+          </View>
+          <Pressable
+            onPress={addContact}
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 4,
+              backgroundColor: colors.primary,
+              paddingHorizontal: 8,
+              paddingVertical: 4,
+              borderRadius: 6,
+            }}
+          >
+            <Ionicons name="add" size={14} color="#fff" />
+            <Text style={{ color: "#fff", fontSize: 11, fontWeight: "700" }}>Add Contact</Text>
+          </Pressable>
+        </View>
+
+        {errors.contacts ? <Text style={{ color: colors.danger, fontSize: 12 }}>{errors.contacts}</Text> : null}
+
+        {contacts.map((contact, idx) => (
+          <View
+            key={contact.id}
+            style={{
+              backgroundColor: colors.card,
+              borderWidth: 1,
+              borderColor: colors.border,
+              borderRadius: 10,
+              padding: 10,
+              gap: 8,
+            }}
+          >
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                <View
+                  style={{
+                    backgroundColor: idx === 0 ? colors.primary : colors.cardAlt,
+                    paddingHorizontal: 6,
+                    paddingVertical: 2,
+                    borderRadius: 4,
+                  }}
+                >
+                  <Text
+                    style={{
+                      fontSize: 10,
+                      fontWeight: "800",
+                      color: idx === 0 ? "#fff" : colors.muted,
+                      textTransform: "uppercase",
+                    }}
+                  >
+                    {idx === 0 ? "Primary Contact" : `Contact #${idx + 1}`}
+                  </Text>
+                </View>
+                {contact.designation ? (
+                  <Text style={{ fontSize: 11, color: colors.muted, fontStyle: "italic" }}>
+                    ({contact.designation})
+                  </Text>
+                ) : null}
+              </View>
+              {contacts.length > 1 ? (
+                <Pressable onPress={() => removeContact(idx)} style={{ padding: 2 }}>
+                  <Ionicons name="trash-outline" size={16} color={colors.danger} />
+                </Pressable>
+              ) : null}
+            </View>
+
+            <Field
+              label="Contact person name *"
+              value={contact.contact_person}
+              onChangeText={(val) => updateContact(idx, "contact_person", val)}
+              placeholder="Dr. Rajesh Gupta / Mr. Sharma"
+            />
+            {errors[`contactPerson_${idx}`] ? (
+              <Text style={{ color: colors.danger, fontSize: 11 }}>{errors[`contactPerson_${idx}`]}</Text>
+            ) : null}
+
+            <Field
+              label="Contact phone / mobile *"
+              value={contact.contact_number}
+              onChangeText={(val) => updateContact(idx, "contact_number", val)}
+              keyboardType="phone-pad"
+              placeholder="9876543210"
+            />
+            {errors[`contactNumber_${idx}`] ? (
+              <Text style={{ color: colors.danger, fontSize: 11 }}>{errors[`contactNumber_${idx}`]}</Text>
+            ) : null}
+
+            <Field
+              label="Contact email (optional)"
+              value={contact.contact_email}
+              onChangeText={(val) => updateContact(idx, "contact_email", val)}
+              keyboardType="email-address"
+              autoCapitalize="none"
+              placeholder="contact@client.com"
+            />
+            {errors[`contactEmail_${idx}`] ? (
+              <Text style={{ color: colors.danger, fontSize: 11 }}>{errors[`contactEmail_${idx}`]}</Text>
+            ) : null}
+          </View>
+        ))}
+      </View>
       <Field label="Address / location" value={address} onChangeText={setAddress} placeholder="City, state, or full address" />
       <View style={{ flexDirection: "row", gap: 10 }}>
         <View style={{ flex: 1 }}><Field label="Planned start time" value={start} onChangeText={setStart} placeholder="HH:MM" /></View>
@@ -677,10 +1146,13 @@ export function ExpenseFormSheet({
     description?: string;
     start_reading?: number;
     closing_reading?: number;
+    receipt_attachment?: WorkPlanExpenseAttachment | string | null;
+    attachments?: (WorkPlanExpenseAttachment | string)[];
   } | null;
   onClose: () => void;
-  onSubmit: (body: Record<string, unknown>, file: LocalFile | null) => void;
+  onSubmit: (body: Record<string, unknown>, files: LocalFile[]) => void;
 }) {
+  const colors = useThemeColors();
   const [category, setCategory] = useState<WorkPlanExpenseCategory>("Travel");
   const [sub, setSub] = useState<(typeof WORK_PLAN_TRAVEL_SUB_CATEGORIES)[number]>("Cab");
   const [amount, setAmount] = useState("");
@@ -690,7 +1162,8 @@ export function ExpenseFormSheet({
   const [description, setDescription] = useState("");
   const [startReading, setStartReading] = useState("");
   const [endReading, setEndReading] = useState("");
-  const [file, setFile] = useState<LocalFile | null>(null);
+  const [newFiles, setNewFiles] = useState<LocalFile[]>([]);
+  const [existingAttachments, setExistingAttachments] = useState<(WorkPlanExpenseAttachment | string)[]>([]);
   const bike = category === "Travel" && sub === "Private Bike";
   const styles = useSheetStyles();
 
@@ -705,11 +1178,66 @@ export function ExpenseFormSheet({
     setDescription(initial?.description || "");
     setStartReading(initial?.start_reading != null ? String(initial.start_reading) : "");
     setEndReading(initial?.closing_reading != null ? String(initial.closing_reading) : "");
-    setFile(null);
+    setNewFiles([]);
+
+    const existingList: (WorkPlanExpenseAttachment | string)[] = [];
+    if (initial?.attachments && Array.isArray(initial.attachments) && initial.attachments.length > 0) {
+      existingList.push(...initial.attachments);
+    } else if (initial?.receipt_attachment) {
+      existingList.push(initial.receipt_attachment);
+    }
+    setExistingAttachments(existingList);
   }, [visible, initial]);
 
+  const handleStartReadingChange = (val: string) => {
+    setStartReading(val);
+    if (bike) {
+      const s = parseFloat(val);
+      const e = parseFloat(endReading);
+      if (!isNaN(s) && !isNaN(e) && e >= s && s >= 0) {
+        const km = Math.round((e - s) * 100) / 100;
+        setAmount(String(Math.round(km * 3.5 * 100) / 100));
+      }
+    }
+  };
+
+  const handleEndReadingChange = (val: string) => {
+    setEndReading(val);
+    if (bike) {
+      const s = parseFloat(startReading);
+      const e = parseFloat(val);
+      if (!isNaN(s) && !isNaN(e) && e >= s && s >= 0) {
+        const km = Math.round((e - s) * 100) / 100;
+        setAmount(String(Math.round(km * 3.5 * 100) / 100));
+      }
+    }
+  };
+
+  const pickMoreFiles = async () => {
+    const picked = await pickMultipleImageFiles();
+    if (picked.length > 0) {
+      setNewFiles((prev) => [...prev, ...picked]);
+    }
+  };
+
+  const removeNewFile = (index: number) => {
+    setNewFiles((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const removeExistingAttachment = (index: number) => {
+    setExistingAttachments((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const numAmt = Number(amount) || 0;
+  const totalAttachmentsCount = existingAttachments.length + newFiles.length;
+  const needReceipt = numAmt > 200;
+  const startNum = parseFloat(startReading);
+  const endNum = parseFloat(endReading);
+  const hasBikeDistance = bike && !isNaN(startNum) && !isNaN(endNum) && endNum >= startNum;
+  const bikeDistanceKm = hasBikeDistance ? Math.round((endNum - startNum) * 100) / 100 : 0;
+
   return (
-    <Sheet visible={visible} title="Expense" onClose={onClose}>
+    <Sheet visible={visible} title="Expense Claim" onClose={onClose}>
       <View style={styles.row}>
         {WORK_PLAN_EXPENSE_CATEGORIES.map((item) => (
           <Pressable key={item} style={[styles.choice, category === item && styles.choiceOn]} onPress={() => setCategory(item)}>
@@ -726,7 +1254,25 @@ export function ExpenseFormSheet({
           ))}
         </View>
       ) : null}
-      <Field label="Amount" value={amount} onChangeText={setAmount} keyboardType="decimal-pad" />
+
+      {bike ? (
+        <View style={{ backgroundColor: "#0284c715", borderRadius: 10, padding: 12, marginVertical: 6, borderWidth: 1, borderColor: "#38bdf840" }}>
+          <Text style={{ fontSize: 13, fontWeight: "700", color: "#0284c7", marginBottom: 6 }}>
+            🚲 Private Bike Mileage (₹3.50 / KM)
+          </Text>
+          <Field label="Start reading (KM) *" value={startReading} onChangeText={handleStartReadingChange} keyboardType="decimal-pad" placeholder="e.g. 12450" />
+          <Field label="Closing reading (KM) *" value={endReading} onChangeText={handleEndReadingChange} keyboardType="decimal-pad" placeholder="e.g. 12490" />
+          {hasBikeDistance ? (
+            <View style={{ marginTop: 6, padding: 8, backgroundColor: "#0284c720", borderRadius: 6 }}>
+              <Text style={{ fontSize: 13, fontWeight: "700", color: "#0369a1" }}>
+                Total: {bikeDistanceKm} KM × ₹3.50 = ₹{(bikeDistanceKm * 3.5).toFixed(2)}
+              </Text>
+            </View>
+          ) : null}
+        </View>
+      ) : null}
+
+      <Field label="Amount (₹) *" value={amount} onChangeText={setAmount} keyboardType="decimal-pad" placeholder="0.00" />
       <View style={styles.row}>
         {WORK_PLAN_EXPENSE_PAYMENT_MODES.map((item) => (
           <Pressable key={item} style={[styles.choice, mode === item && styles.choiceOn]} onPress={() => setMode(item)}>
@@ -734,20 +1280,58 @@ export function ExpenseFormSheet({
           </Pressable>
         ))}
       </View>
-      <Field label="Vendor" value={vendor} onChangeText={setVendor} />
-      <Field label="Bill number" value={bill} onChangeText={setBill} />
-      <Field label="Description" value={description} onChangeText={setDescription} multiline />
-      {bike ? (
-        <>
-          <Field label="Start reading" value={startReading} onChangeText={setStartReading} keyboardType="decimal-pad" />
-          <Field label="Closing reading" value={endReading} onChangeText={setEndReading} keyboardType="decimal-pad" />
-        </>
-      ) : null}
-      <Button label={file ? file.name : "Attach receipt"} variant="ghost" onPress={() => void pickImageFile().then(setFile)} />
+      <Field label="Vendor" value={vendor} onChangeText={setVendor} placeholder="Petrol pump, taxi, restaurant, etc." />
+      <Field label="Bill number" value={bill} onChangeText={setBill} placeholder="Invoice / receipt number" />
+      <Field label="Description" value={description} onChangeText={setDescription} multiline placeholder="Purpose or context of expense" />
+
+      <View style={{ marginVertical: 8, gap: 6 }}>
+        <Text style={{ fontSize: 12, color: needReceipt && totalAttachmentsCount === 0 ? "#ef4444" : colors.muted, fontWeight: "600" }}>
+          {needReceipt ? "* Attachments required (Amount > ₹200)" : "Attachments (Optional for ≤ ₹200)"}
+        </Text>
+
+        {existingAttachments.length > 0 ? (
+          <View style={{ gap: 4 }}>
+            <Text style={{ fontSize: 11, color: colors.muted, fontWeight: "600" }}>Current Attachments:</Text>
+            {existingAttachments.map((att, idx) => {
+              const name = typeof att === "object" ? att.original_name || att.file_name || `Attachment ${idx + 1}` : `Attachment ${idx + 1}`;
+              return (
+                <View key={idx} style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 10, paddingVertical: 6, backgroundColor: colors.cardAlt, borderRadius: 8, borderWidth: 1, borderColor: colors.border }}>
+                  <Text numberOfLines={1} style={{ flex: 1, fontSize: 12, color: colors.text }}>📎 {name}</Text>
+                  <Pressable onPress={() => removeExistingAttachment(idx)} style={{ padding: 4 }}>
+                    <Ionicons name="close-circle" size={16} color={colors.danger} />
+                  </Pressable>
+                </View>
+              );
+            })}
+          </View>
+        ) : null}
+
+        {newFiles.length > 0 ? (
+          <View style={{ gap: 4 }}>
+            <Text style={{ fontSize: 11, color: colors.muted, fontWeight: "600" }}>New Files to Upload:</Text>
+            {newFiles.map((f, idx) => (
+              <View key={idx} style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 10, paddingVertical: 6, backgroundColor: colors.cardAlt, borderRadius: 8, borderWidth: 1, borderColor: colors.border }}>
+                <Text numberOfLines={1} style={{ flex: 1, fontSize: 12, color: colors.text }}>📄 {f.name}</Text>
+                <Pressable onPress={() => removeNewFile(idx)} style={{ padding: 4 }}>
+                  <Ionicons name="close-circle" size={16} color={colors.danger} />
+                </Pressable>
+              </View>
+            ))}
+          </View>
+        ) : null}
+
+        <Button
+          label={totalAttachmentsCount > 0 ? "+ Add More Receipts / Files" : "📎 Attach Receipts / Documents"}
+          variant="ghost"
+          onPress={pickMoreFiles}
+        />
+      </View>
+
       <Button
-        label={saving ? "Saving…" : "Save expense"}
-        disabled={saving || !amount}
-        onPress={() =>
+        label={saving ? "Saving…" : "Save expense claim"}
+        disabled={saving || !amount || (needReceipt && totalAttachmentsCount === 0)}
+        onPress={() => {
+          const existingIds = existingAttachments.map((a) => (typeof a === "object" ? a._id : String(a))).filter(Boolean);
           onSubmit(
             {
               expense_date: planDate,
@@ -758,12 +1342,13 @@ export function ExpenseFormSheet({
               vendor_name: vendor.trim() || undefined,
               bill_number: bill.trim() || undefined,
               description: description.trim() || undefined,
-              start_reading: bike ? Number(startReading) : null,
-              closing_reading: bike ? Number(endReading) : null,
+              start_reading: bike && startReading ? Number(startReading) : null,
+              closing_reading: bike && endReading ? Number(endReading) : null,
+              existing_attachments: existingIds,
             },
-            file,
-          )
-        }
+            newFiles,
+          );
+        }}
       />
     </Sheet>
   );
@@ -1100,6 +1685,57 @@ export function RejectSheet({
     <Sheet visible={visible} title="Reject expense" onClose={onClose}>
       <Field label="Reason" value={reason} onChangeText={setReason} multiline />
       <Button label={saving ? "Rejecting…" : "Reject"} variant="danger" disabled={saving || !reason.trim()} onPress={() => onSubmit(reason.trim())} />
+    </Sheet>
+  );
+}
+
+export function PlanRemarkSheet({
+  visible,
+  saving,
+  initialRemarks,
+  onClose,
+  onSubmit,
+}: {
+  visible: boolean;
+  saving?: boolean;
+  initialRemarks?: string;
+  onClose: () => void;
+  onSubmit: (remark: string) => void;
+}) {
+  const [remark, setRemark] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (visible) {
+      setRemark(initialRemarks || "");
+      setError("");
+    }
+  }, [visible, initialRemarks]);
+
+  function submit() {
+    if (!remark.trim()) {
+      setError("Please enter a remark or directive.");
+      return;
+    }
+    setError("");
+    onSubmit(remark.trim());
+  }
+
+  return (
+    <Sheet visible={visible} title="Senior Remark" onClose={onClose}>
+      <Text style={{ color: "#64748b", fontSize: 13, marginBottom: 8 }}>
+        Record a supervisory review note, guidance, or directive for this work plan.
+      </Text>
+      <Field
+        label="Senior Remark *"
+        value={remark}
+        onChangeText={setRemark}
+        multiline
+        placeholder="Enter supervisor guidance or directive…"
+      />
+      {error ? <Text style={{ color: "#ef4444", fontSize: 13 }}>{error}</Text> : null}
+      <Button label={saving ? "Saving…" : "Save Remark"} onPress={submit} disabled={saving} />
+      <Button label="Cancel" variant="ghost" onPress={onClose} />
     </Sheet>
   );
 }

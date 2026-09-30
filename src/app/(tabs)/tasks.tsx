@@ -8,7 +8,7 @@ import { Button, Card, Chip, Empty, Field, FilterBar, Headline, Loading, Screen,
 import { VisitFormSheet, WorkFormSheet } from "@/components/sheets";
 import { StatusSheet, type CompleteVisitAnswers, type WorkflowStatus } from "@/components/StatusSheet";
 import { apiErrorMessage } from "@/lib/apiError";
-import { formatPlanDate, isPlanWindowClosed, isoDate, monthBounds, personId, personName, todayISO } from "@/lib/dates";
+import { formatPlanDate, isPlanWindowClosed, isoDate, monthBounds, personId, personName, stripHtml, todayISO } from "@/lib/dates";
 import { useTeamScope } from "@/lib/teamScope";
 import {
   useAddStandaloneVisitMutation,
@@ -41,6 +41,9 @@ const STATUSES = [
   { id: "pending", label: "Pending" },
   { id: "in_progress", label: "In progress" },
   { id: "completed", label: "Completed" },
+  { id: "rescheduled", label: "Rescheduled" },
+  { id: "skipped", label: "Skipped" },
+  { id: "cancelled", label: "Cancelled" },
 ];
 
 function ymd(year: number, month: number, day: number) {
@@ -103,6 +106,15 @@ export default function TasksScreen() {
       for (const visit of plan.visits || []) {
         const owner = ownerOf(visit, plan);
         if (!team.allows(owner.id)) continue;
+        const visitContacts = Array.isArray(visit.contacts) && visit.contacts.length > 0
+          ? visit.contacts
+          : (visit.contact_person || visit.contact_number || visit.contact_email)
+            ? [{ contact_person: visit.contact_person, contact_number: visit.contact_number, contact_email: visit.contact_email }]
+            : [];
+        const contactNames = visitContacts.length > 0
+          ? visitContacts.map((c) => c.contact_person).filter(Boolean).join(", ")
+          : visit.contact_person;
+
         list.push({
           kind: "visit",
           planId,
@@ -111,7 +123,7 @@ export default function TasksScreen() {
           executiveId: owner.id,
           executiveName: owner.name,
           title: visit.party_name || "Field visit",
-          detail: [visit.contact_person, visit.purpose || visit.address].filter(Boolean).join(" · "),
+          detail: [contactNames, visit.purpose || visit.address].filter(Boolean).join(" · "),
           item: visit,
         });
       }
@@ -173,28 +185,46 @@ export default function TasksScreen() {
     open: visibleRows.filter((row) => row.item.status === "created" || row.item.status === "pending").length,
   };
 
-  async function saveStatus(payload: { status: WorkflowStatus; remarks: string; visitAnswers?: CompleteVisitAnswers }) {
+  async function saveStatus(payload: {
+    status: WorkflowStatus;
+    remarks: string;
+    managerRemarks?: string;
+    rescheduledDate?: string;
+    visitAnswers?: CompleteVisitAnswers;
+  }) {
     if (!target) return;
-    if (target.planStatus === "completed" || isPlanWindowClosed(target.planDate || target.item.plan_date)) {
+    if (!team.elevated && (target.planStatus === "completed" || isPlanWindowClosed(target.planDate || target.item.plan_date))) {
       Alert.alert("Read only", target.planStatus === "completed" ? "This work plan is completed." : "The 3-day window has closed.");
       return;
     }
     const itemId = String(target.item._id || target.item.id || "");
     try {
       if (target.kind === "visit") {
-        if (payload.status === "completed") {
-          await completeVisit({ planId: target.planId, visitId: itemId, body: { outcome: payload.remarks, ...(payload.visitAnswers || {}) } }).unwrap();
-        } else if (payload.status === "pending") {
-          await updateVisit({ planId: target.planId, visitId: itemId, body: { status: "pending", pending_remarks: payload.remarks } }).unwrap();
+        const body: Record<string, unknown> = {
+          status: payload.status,
+          pending_remarks: payload.remarks,
+          in_progress_remarks: payload.remarks,
+          outcome: payload.remarks,
+          ...(payload.managerRemarks ? { manager_remarks: payload.managerRemarks } : {}),
+          ...(payload.rescheduledDate ? { rescheduled_date: payload.rescheduledDate } : {}),
+          ...(payload.visitAnswers || {}),
+        };
+        if (payload.status === "completed" && payload.visitAnswers) {
+          await completeVisit({ planId: target.planId, visitId: itemId, body }).unwrap();
         } else {
-          await updateVisit({ planId: target.planId, visitId: itemId, body: { status: "in_progress", in_progress_remarks: payload.remarks } }).unwrap();
+          await updateVisit({ planId: target.planId, visitId: itemId, body }).unwrap();
         }
-      } else if (payload.status === "completed") {
-        await updateWork({ planId: target.planId, workId: itemId, body: { status: "completed", completion_remarks: payload.remarks, outcome: payload.remarks } }).unwrap();
-      } else if (payload.status === "pending") {
-        await updateWork({ planId: target.planId, workId: itemId, body: { status: "pending", pending_remarks: payload.remarks } }).unwrap();
       } else {
-        await updateWork({ planId: target.planId, workId: itemId, body: { status: "in_progress", in_progress_remarks: payload.remarks } }).unwrap();
+        const body: Record<string, unknown> = {
+          status: payload.status,
+          pending_remarks: payload.remarks,
+          in_progress_remarks: payload.remarks,
+          completion_remarks: payload.remarks,
+          outcome: payload.remarks,
+          ...(payload.managerRemarks ? { manager_remarks: payload.managerRemarks } : {}),
+          ...(payload.rescheduledDate ? { rescheduled_date: payload.rescheduledDate } : {}),
+        };
+        await updateWork({ planId: target.planId, workId: itemId, body }).unwrap();
       }
       setTarget(null);
     } catch (err) {
@@ -204,7 +234,7 @@ export default function TasksScreen() {
 
   function renderRow(row: Row) {
     const itemId = String(row.item._id || row.item.id);
-    const locked = row.planStatus === "completed" || isPlanWindowClosed(row.planDate || row.item.plan_date);
+    const locked = !team.elevated && (row.planStatus === "completed" || isPlanWindowClosed(row.planDate || row.item.plan_date));
     return (
       <Card key={`${row.kind}-${itemId}`}>
         <Headline
@@ -214,7 +244,41 @@ export default function TasksScreen() {
           status={row.item.status}
           statusColor={statusColor[row.item.status]}
         />
+        {row.item.rescheduled_date ? (
+          <View style={{ alignSelf: "flex-start", backgroundColor: "#fff7ed", borderWidth: 1, borderColor: "#fed7aa", borderRadius: 6, paddingHorizontal: 8, paddingVertical: 2, marginTop: 4 }}>
+            <Text style={{ color: "#c2410c", fontSize: 11, fontWeight: "700" }}>
+              Rescheduled to: {formatPlanDate(row.item.rescheduled_date)}
+            </Text>
+          </View>
+        ) : null}
         {row.detail ? <Text style={{ color: colors.muted }}>{row.detail}</Text> : null}
+            {(() => {
+          const isSeniorViewing = team.elevated && String(team.selfId) !== String(row.executiveId || "");
+          return isSeniorViewing && row.item.manager_remarks ? (
+            <View style={{ backgroundColor: "#faf5ff", borderWidth: 1, borderColor: "#e9d5ff", borderRadius: 8, padding: 8, marginTop: 4, gap: 2 }}>
+              <Text style={{ color: "#7e22ce", fontSize: 11, fontWeight: "700" }}>Senior Remark</Text>
+              <Text style={{ color: colors.text, fontSize: 12 }}>{stripHtml(row.item.manager_remarks)}</Text>
+            </View>
+          ) : null;
+        })()}
+        {(() => {
+          const isSeniorViewing = team.elevated && String(team.selfId) !== String(row.executiveId || "");
+          return isSeniorViewing && row.item.authority_remarks && row.item.authority_remarks.length > 0 ? (
+            <View style={{ backgroundColor: "#faf5ff", borderWidth: 1, borderColor: "#e9d5ff", borderRadius: 8, padding: 8, marginTop: 4, gap: 4 }}>
+              <Text style={{ color: "#7e22ce", fontSize: 11, fontWeight: "700" }}>
+                Senior Remarks ({row.item.authority_remarks.length})
+              </Text>
+              {row.item.authority_remarks.map((r, idx) => (
+                <View key={r._id || `ar-${idx}`} style={{ borderTopWidth: idx > 0 ? 1 : 0, borderTopColor: "#f3e8ff", paddingTop: idx > 0 ? 4 : 0 }}>
+                  <Text style={{ color: "#6b21a8", fontSize: 11, fontWeight: "700" }}>
+                    {r.role ? `[${r.role.toUpperCase()}] ` : ""}{r.user_name || "Authority"}
+                  </Text>
+                  <Text style={{ color: colors.text, fontSize: 12 }}>{stripHtml(r.remark)}</Text>
+                </View>
+              ))}
+            </View>
+          ) : null;
+        })()}
         {locked ? (
           <Text style={{ color: colors.muted }}>
             {row.planStatus === "completed" ? "Completed plan is read only." : "The 3-day window has closed."}
@@ -381,6 +445,10 @@ export default function TasksScreen() {
         initialPendingRemarks={target?.item.pending_remarks}
         initialInProgressRemarks={target?.item.in_progress_remarks}
         initialOutcome={target?.kind === "work" ? target.item.completion_remarks || target.item.outcome : target?.kind === "visit" ? target.item.outcome : ""}
+        initialManagerRemarks={target?.item.manager_remarks}
+        initialRescheduledDate={target?.item.rescheduled_date}
+        authorityRemarks={target?.item.authority_remarks}
+        isElevated={team.elevated && String(team.selfId) !== String(target?.executiveId || "")}
         initialAnswers={
           target?.kind === "visit"
             ? {

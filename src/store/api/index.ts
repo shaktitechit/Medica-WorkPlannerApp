@@ -5,3 +5,4 @@ export * from "./workPlannerApiSlice";
 export * from "./partyApiSlice";
 export * from "./leadsApiSlice";
 export * from "./notificationsApiSlice";
+export * from "./powerAppApiSlice";

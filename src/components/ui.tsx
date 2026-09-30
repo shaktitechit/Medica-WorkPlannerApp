@@ -191,8 +191,18 @@ export function GridItem({ children }: { children: ReactNode }) {
 
 export function SplitActions({ children }: { children: ReactNode }) {
   const { styles } = useUiStyles();
-  const items = Children.toArray(children);
-  const width = items.length <= 1 ? "100%" : items.length === 2 ? "50%" : "33.33%";
+  const items = Children.toArray(children).filter(Boolean);
+  const count = items.length;
+  const width =
+    count <= 1
+      ? "100%"
+      : count === 2
+      ? "50%"
+      : count === 3
+      ? "33.33%"
+      : count === 4
+      ? "50%"
+      : "50%";
   return (
     <View style={styles.split}>
       {items.map((child, index) => (
@@ -346,7 +356,7 @@ function createUiStyles(colors: ThemeColors) {
   split: { flexDirection: "row", flexWrap: "wrap", marginHorizontal: -4 },
   splitItem: { padding: 4 },
   headline: { flexDirection: "row", alignItems: "flex-start", gap: 8 },
-  headlineText: { flex: 1, gap: 2 },
+  headlineText: { flex: 1, gap: 2, minWidth: 0 },
   headlineTitle: { color: colors.text, fontSize: 16, fontWeight: "700" },
   badge: { borderRadius: 999, paddingHorizontal: 8, paddingVertical: 4, maxWidth: "46%", flexShrink: 1 },
   badgeText: { fontSize: 11, fontWeight: "700", textTransform: "capitalize" },

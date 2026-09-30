@@ -6,7 +6,7 @@ import { apiErrorMessage } from "@/lib/apiError";
 import { useSession } from "@/lib/session";
 import { useChangePasswordMutation, useGetMeQuery } from "@/store/api/authApiSlice";
 import { useGetUserSettingsQuery } from "@/store/api/workPlannerApiSlice";
-import { roleLabel, isWpAdmin, isWpManager } from "@/utils/roles";
+import { roleLabel, isWpAdmin, isWpManager, isWpElevated } from "@/utils/roles";
 import { useThemeColors } from "@/theme";
 
 export default function ProfileScreen() {
@@ -16,6 +16,7 @@ export default function ProfileScreen() {
   const user = me.data?.user || session?.user;
   const admin = isWpAdmin(user);
   const manager = isWpManager(user);
+  const elevated = isWpElevated(user);
   const settings = useGetUserSettingsQuery(user?._id || "", { skip: !user?._id });
   const [changePassword, passwordState] = useChangePasswordMutation();
   const [currentPassword, setCurrentPassword] = useState("");
@@ -43,10 +44,10 @@ export default function ProfileScreen() {
           Roles: {(user?.portals || []).map((portal) => `${portal.portal_code}: ${portal.access_roles.join(", ")}`).join(" · ") || "—"}
         </Text>
       </Card>
-      {manager || admin ? (
+      {elevated || admin ? (
         <>
           <Section>Workspace</Section>
-          {manager ? <Button label="My team" variant="ghost" onPress={() => router.push("/team")} /> : null}
+          {elevated && !admin ? <Button label="My team" variant="ghost" onPress={() => router.push("/team")} /> : null}
           {admin ? <Button label="Assigned teams" variant="ghost" onPress={() => router.push("/assigned-teams")} /> : null}
           {admin ? <Button label="Team hierarchy" variant="ghost" onPress={() => router.push("/team-manager")} /> : null}
         </>

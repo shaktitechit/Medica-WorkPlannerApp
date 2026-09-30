@@ -40,7 +40,17 @@ function unreadCount(raw: unknown) {
   }).length;
 }
 
-export function AppHeader({ title }: { title: string; subtitle?: string }) {
+export function AppHeader({
+  title,
+  subtitle,
+  showBack,
+  onBack,
+}: {
+  title: string;
+  subtitle?: string;
+  showBack?: boolean;
+  onBack?: () => void;
+}) {
   const router = useRouter();
   const { session } = useSession();
   const { data } = useGetCompanyInfoQuery();
@@ -61,15 +71,37 @@ export function AppHeader({ title }: { title: string; subtitle?: string }) {
   const unread = unreadCount(notifications.data);
   const badge = unread > 99 ? "99+" : String(unread);
 
+  const handleBack = () => {
+    if (onBack) {
+      onBack();
+    } else if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace("/(tabs)/projects" as any);
+    }
+  };
+
   return (
     <View style={styles.wrap}>
-      <CompanyLogo size={40} />
+      {showBack ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Go back"
+          hitSlop={6}
+          onPress={handleBack}
+          style={[stylesBase.iconBtn, { backgroundColor: colors.card, borderColor: colors.border }]}
+        >
+          <Ionicons name="chevron-back" size={22} color={colors.text} />
+        </Pressable>
+      ) : (
+        <CompanyLogo size={40} />
+      )}
       <View style={styles.brandText}>
         <Text style={styles.title} numberOfLines={1}>
           {title}
         </Text>
         <Text style={styles.meta} numberOfLines={1}>
-          {company}
+          {subtitle || company}
         </Text>
       </View>
       <View style={styles.actions}>
