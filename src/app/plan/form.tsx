@@ -362,7 +362,7 @@ export default function PlanFormScreen() {
         sales_user_id: targetUserId,
         limit: 50,
         include_standalone: false,
-        include_visits: true,
+        include_visits: false,
         include_works: true,
       }).unwrap();
 
@@ -386,30 +386,13 @@ export default function PlanFormScreen() {
         return;
       }
 
-      const existingVisitIds = new Set(
-        [...visits.map((v) => recordId(v)), ...(loadedPlan?.visits || []).map((v) => recordId(v))].filter(Boolean)
-      );
       const existingWorkIds = new Set(
         [...works.map((w) => recordId(w)), ...(loadedPlan?.works || []).map((w) => recordId(w))].filter(Boolean)
       );
 
-      const newVisitsToAdd: DraftVisit[] = [];
       const newWorksToAdd: DraftWork[] = [];
 
       for (const p of previousPlans) {
-        for (const v of p.visits || []) {
-          const vId = recordId(v);
-          if (vId && existingVisitIds.has(vId)) continue;
-          if (["created", "pending", "in_progress", "checked_in"].includes(v.status)) {
-            if (vId) existingVisitIds.add(vId);
-            newVisitsToAdd.push({
-              ...v,
-              localId: `rollover-${vId || Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-              is_from_previous_plan: true,
-              previous_plan_date: p.plan_date,
-            });
-          }
-        }
         for (const w of p.works || []) {
           const wId = recordId(w);
           if (wId && existingWorkIds.has(wId)) continue;
@@ -425,30 +408,26 @@ export default function PlanFormScreen() {
         }
       }
 
-      const visitsCount = newVisitsToAdd.length;
       const tasksCount = newWorksToAdd.length;
 
-      if (visitsCount === 0 && tasksCount === 0) {
+      if (tasksCount === 0) {
         if (isManual) {
-          Alert.alert("Auto Rollover", "No uncompleted visits or tasks found to roll over.");
+          Alert.alert("Auto Rollover", "No uncompleted tasks found to roll over.");
         }
         return;
       }
 
-      if (visitsCount > 0) {
-        setVisits((prev) => [...prev, ...newVisitsToAdd]);
-      }
       if (tasksCount > 0) {
         setWorks((prev) => [...prev, ...newWorksToAdd]);
       }
 
-      if (tasksCount > 0 && (planType === "Visits" || visits.length > 0 || visitsCount > 0)) {
+      if (tasksCount > 0 && (planType === "Visits" || visits.length > 0)) {
         setPlanType("Tasks & Visits");
       }
 
       Alert.alert(
         "Auto Rollover Completed",
-        `🔄 Rolled over ${visitsCount} visit${visitsCount === 1 ? "" : "s"} and ${tasksCount} task${tasksCount === 1 ? "" : "s"} from previous plans.`
+        `🔄 Rolled over ${tasksCount} task${tasksCount === 1 ? "" : "s"} from previous plans.`
       );
     } catch (err: any) {
       if (isManual) {
@@ -843,18 +822,10 @@ export default function PlanFormScreen() {
             <Text style={{ color: colors.muted, fontSize: 13 }}>Cannot add visits to a completed plan.</Text>
           ) : null}
           {!completedLocked && !readOnly ? (
-            <View style={{ gap: 8 }}>
-              <SplitActions>
-                <Button label="Add visit" onPress={() => { setEditingVisitId(null); setVisitOpen(true); }} />
-                <Button label="Previous visits" variant="ghost" onPress={() => { setPendingQuery(""); setPickedIds([]); setPendingMode("visits"); }} />
-              </SplitActions>
-              <Button
-                label={autoRolloverLoading ? "Rolling over…" : "Auto Rollover (3 Days)"}
-                variant="ghost"
-                onPress={() => void handleAutoRollover(true)}
-                disabled={autoRolloverLoading}
-              />
-            </View>
+            <SplitActions>
+              <Button label="Add visit" onPress={() => { setEditingVisitId(null); setVisitOpen(true); }} />
+              <Button label="Previous visits" variant="ghost" onPress={() => { setPendingQuery(""); setPickedIds([]); setPendingMode("visits"); }} />
+            </SplitActions>
           ) : null}
           {(loadedPlan?.visits || []).length + visits.length === 0 ? (
             <Text style={{ color: colors.muted, fontSize: 13 }}>No visits added yet.</Text>
